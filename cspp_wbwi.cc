@@ -32,7 +32,6 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   using Elem = uint32_t;
   struct VecNode {
     uint32_t num;
-    uint32_t cap;
     uint32_t pos;
   };
   CSPP_WBWI_Factory*    m_fac;
@@ -70,9 +69,9 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         ReadKeyFromWriteBatchEntry(&raw_entry, &userkey, cf_id != 0);
     assert(success);
     DefineLookupKey(lookup_key, cf_id, userkey);
-    VecNode vn = {0,0,0};
+    VecNode vn = {0,0};
     if (m_trie.insert(lookup_key, &vn, &m_wtoken)) {
-      vn.cap = vn.num = 1;
+      vn.num = 1;
       vn.pos = m_trie.mem_alloc(sizeof(Elem));
       *(Elem*)m_trie.mem_get(vn.pos) = Elem(offset);
       m_wtoken.mutable_value_of<VecNode>() = vn;
@@ -88,16 +87,14 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         vec[vn.num-1] = Elem(offset); // overwrite
       }
       else {
-        if (vn.num < vn.cap) {
+        if (vn.num & (vn.num-1)) { // is not power of 2, has space
           vec[vn.num] = Elem(offset);
           m_wtoken.mutable_value_of<VecNode>().num = vn.num + 1;
         }
         else {
-          ROCKSDB_ASSERT_EQ(vn.num, vn.cap);
-          size_t oldlen = sizeof(Elem) * vn.cap;
-          size_t newlen = sizeof(Elem) * vn.cap * 2;
+          size_t oldlen = sizeof(Elem) * vn.num;
+          size_t newlen = sizeof(Elem) * vn.num * 2;
           size_t newpos = m_trie.mem_alloc3(vn.pos, oldlen, newlen);
-          vn.cap *= 2;
           vn.pos = (uint32_t)newpos;
           vec = (Elem*)m_trie.mem_get(newpos);
           vec[vn.num++] = Elem(offset);
