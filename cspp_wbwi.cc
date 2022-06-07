@@ -525,7 +525,8 @@ void JS_CSPP_WBWI_AddVersion(json& djs, bool html) {
 }
 ROCKSDB_ENUM_CLASS(HugePageEnum, uint8_t, kNone = 0, kMmap = 1, kTransparent = 2);
 struct CSPP_WBWI_Factory final : public WriteBatchWithIndexFactory {
-  intptr_t m_mem_cap = 64LL << 10;
+  size_t trie_reserve_cap = 64 << 10;
+  size_t data_reserve_cap = 64 << 10;
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
@@ -541,15 +542,14 @@ struct CSPP_WBWI_Factory final : public WriteBatchWithIndexFactory {
   const char *Name() const noexcept final { return "CSPP_WBWI_Factory"; }
 //-----------------------------------------------------------------
   void Update(const json&, const json& js, const SidePluginRepo&) {
-    size_t mem_cap = m_mem_cap;
-    ROCKSDB_JSON_OPT_SIZE(js, mem_cap);
-    m_mem_cap = std::max<intptr_t>(mem_cap, 64LL<<10);
+    ROCKSDB_JSON_OPT_SIZE(js, trie_reserve_cap);
+    ROCKSDB_JSON_OPT_SIZE(js, data_reserve_cap);
   }
   std::string ToString(const json& d, const SidePluginRepo&) const {
-    size_t mem_cap = m_mem_cap;
     auto avg_used_mem = cumu_num ? cumu_used_mem / cumu_num : 0;
     json djs;
-    ROCKSDB_JSON_SET_SIZE(djs, mem_cap);
+    ROCKSDB_JSON_SET_SIZE(djs, trie_reserve_cap);
+    ROCKSDB_JSON_SET_SIZE(djs, data_reserve_cap);
     ROCKSDB_JSON_SET_PROP(djs, cumu_num);
     ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
@@ -576,7 +576,8 @@ CSPP_WBWI::Iter::~Iter() noexcept {
 }
 CSPP_WBWI::CSPP_WBWI(CSPP_WBWI_Factory* f, bool overwrite_key)
     : WriteBatchWithIndex(Slice()) // default cons placeholder with Slice
-    , m_trie(sizeof(VecNode), f->m_mem_cap, Patricia::SingleThreadStrict) {
+    , m_trie(sizeof(VecNode), f->trie_reserve_cap, Patricia::SingleThreadStrict)
+    , m_batch(f->data_reserve_cap) {
   m_overwrite_key = overwrite_key;
   m_fac = f;
   m_wtoken.acquire(&m_trie);
@@ -592,7 +593,7 @@ void CSPP_WBWI::ClearIndex() {
   m_wtoken.release();
   m_wtoken.~SingleWriterToken();
   m_trie.~MainPatricia();
-  new (&m_trie) MainPatricia(sizeof(VecNode), m_fac->m_mem_cap, Patricia::SingleThreadStrict);
+  new (&m_trie) MainPatricia(sizeof(VecNode), m_fac->trie_reserve_cap, Patricia::SingleThreadStrict);
   new (&m_wtoken) Patricia::SingleWriterToken();
   m_wtoken.acquire(&m_trie);
   m_last_entry_offset = 0;
