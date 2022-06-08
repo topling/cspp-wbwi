@@ -539,7 +539,7 @@ struct CSPP_WBWI_Factory final : public WriteBatchWithIndexFactory {
     }
     return new CSPP_WBWI(this, overwrite_key);
   }
-  const char *Name() const noexcept final { return "CSPP_WBWI_Factory"; }
+  const char *Name() const noexcept final { return "CSPP_WBWI"; }
 //-----------------------------------------------------------------
   void Update(const json&, const json& js, const SidePluginRepo&) {
     ROCKSDB_JSON_OPT_SIZE(js, trie_reserve_cap);
@@ -600,7 +600,7 @@ void CSPP_WBWI::ClearIndex() {
   m_last_sub_batch_offset = 0;
   m_sub_batch_cnt = 1;
 }
-ROCKSDB_REG_JSON_REPO_CONS("CSPP_WBWI", CSPP_WBWI_Factory, WriteBatchWithIndexFactory);
+ROCKSDB_REG_Plugin("CSPP_WBWI", CSPP_WBWI_Factory, WriteBatchWithIndexFactory);
 ROCKSDB_REG_EasyProxyManip("CSPP_WBWI", CSPP_WBWI_Factory, WriteBatchWithIndexFactory);
 WriteBatchWithIndexFactory* NewCSPP_WBWIForPlain(const std::string& jstr) {
   json js = json::parse(jstr);
