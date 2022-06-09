@@ -193,7 +193,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
           break;
         default:
           return Status::Corruption("unknown WriteBatch tag in ReBuildIndex",
-                                    ToString(static_cast<unsigned int>(tag)));
+                                    std::to_string(size_t(tag)));
       }
     }
     if (s.ok() && found != m_batch.Count()) {
