@@ -63,8 +63,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   }
   void AddOrUpdateIndex(uint32_t cf_id, WriteType type) {
     size_t offset = m_last_entry_offset;
-    Slice raw_entry = Slice(m_batch.Data()).substr(offset);
-    Slice userkey;
+    Slice raw_entry = Slice(m_batch.Data()).substr(offset), userkey;
     bool success __attribute__((unused)) =
         ReadKeyFromWriteBatchEntry(&raw_entry, &userkey, cf_id != 0);
     assert(success);
