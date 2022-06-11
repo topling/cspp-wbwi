@@ -321,7 +321,7 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
   ~Iter() noexcept override;
   uint32_t iter_cf_id() const {
     auto bigendian_cf_id = *(const uint32_t*)m_iter->word().data();
-    return BIG_ENDIAN_OF(bigendian_cf_id);
+    return NATIVE_OF_BIG_ENDIAN(bigendian_cf_id);
   }
   void SetFirstEntry() {
     auto vn = m_iter->value_of<VecNode>();
