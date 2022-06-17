@@ -300,6 +300,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   Status PopSavePoint() final { return m_batch.PopSavePoint(); }
   void SetMaxBytes(size_t max_bytes) final { m_batch.SetMaxBytes(max_bytes); }
   size_t GetDataSize() const final { return m_batch.GetDataSize(); }
+  size_t SubBatchCnt() final { return m_sub_batch_cnt; }
   WBWIIterator* NewIterator(ColumnFamilyHandle* column_family) final;
   WBWIIterator* NewIterator() final;
   Iterator* NewIteratorWithBase(ColumnFamilyHandle*, Iterator* base,
