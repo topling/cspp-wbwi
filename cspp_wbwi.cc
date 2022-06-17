@@ -27,14 +27,14 @@ static fstring InitLookupKey(void* alloca_ptr, uint32_t cf_id, Slice userkey) {
 }
 #define DefineLookupKey(var, cf_id, userkey) \
   const fstring var = InitLookupKey(alloca(4 + userkey.size_), cf_id, userkey)
-struct CSPP_WBWI_Factory;
+struct CSPP_WBWIFactory;
 struct CSPP_WBWI : public WriteBatchWithIndex {
   using Elem = uint32_t;
   struct VecNode {
     uint32_t num;
     uint32_t pos;
   };
-  CSPP_WBWI_Factory*    m_fac;
+  CSPP_WBWIFactory*    m_fac;
   mutable MainPatricia  m_trie;
   mutable Patricia::SingleWriterToken m_wtoken;
   ReadableWriteBatch    m_batch;
@@ -43,7 +43,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   size_t   m_last_entry_offset = 0;
   size_t   m_last_sub_batch_offset = 0;
   size_t   m_sub_batch_cnt = 1;
-  CSPP_WBWI(CSPP_WBWI_Factory*, bool overwrite_key);
+  CSPP_WBWI(CSPP_WBWIFactory*, bool overwrite_key);
   ~CSPP_WBWI() noexcept override;
   void SetLastEntryOffset() {
     m_last_entry_offset = m_batch.GetDataSize();
@@ -104,7 +104,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   }
   using WriteBatchBase::GetWriteBatch;
   WriteBatch* GetWriteBatch() final { return &m_batch; }
-  void Clear() {
+  void Clear() final {
     m_batch.Clear();
     ClearIndex();
   }
@@ -523,13 +523,13 @@ void JS_CSPP_WBWI_AddVersion(json& djs, bool html) {
   }
 }
 ROCKSDB_ENUM_CLASS(HugePageEnum, uint8_t, kNone = 0, kMmap = 1, kTransparent = 2);
-struct CSPP_WBWI_Factory final : public WriteBatchWithIndexFactory {
+struct CSPP_WBWIFactory final : public WBWIFactory {
   size_t trie_reserve_cap = 64 << 10;
   size_t data_reserve_cap = 64 << 10;
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
-  CSPP_WBWI_Factory(const json& js, const SidePluginRepo& r) { Update({}, js, r); }
+  CSPP_WBWIFactory(const json& js, const SidePluginRepo& r) { Update({}, js, r); }
   WriteBatchWithIndex* NewWriteBatchWithIndex(
       const Comparator* default_comparator, bool overwrite_key) final {
     if (default_comparator) {
@@ -573,7 +573,7 @@ CSPP_WBWI::Iter::~Iter() noexcept {
   as_atomic(factory->live_iter_num).fetch_sub(1, std::memory_order_relaxed);
   as_atomic(m_tab->m_live_iter_num).fetch_sub(1, std::memory_order_relaxed);
 }
-CSPP_WBWI::CSPP_WBWI(CSPP_WBWI_Factory* f, bool overwrite_key)
+CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key)
     : WriteBatchWithIndex(Slice()) // default cons placeholder with Slice
     , m_trie(sizeof(VecNode), f->trie_reserve_cap, Patricia::SingleThreadStrict)
     , m_batch(f->data_reserve_cap) {
@@ -599,11 +599,11 @@ void CSPP_WBWI::ClearIndex() {
   m_last_sub_batch_offset = 0;
   m_sub_batch_cnt = 1;
 }
-ROCKSDB_REG_Plugin("CSPP_WBWI", CSPP_WBWI_Factory, WriteBatchWithIndexFactory);
-ROCKSDB_REG_EasyProxyManip("CSPP_WBWI", CSPP_WBWI_Factory, WriteBatchWithIndexFactory);
-WriteBatchWithIndexFactory* NewCSPP_WBWIForPlain(const std::string& jstr) {
+ROCKSDB_REG_Plugin("CSPP_WBWI", CSPP_WBWIFactory, WBWIFactory);
+ROCKSDB_REG_EasyProxyManip("CSPP_WBWI", CSPP_WBWIFactory, WBWIFactory);
+WBWIFactory* NewCSPP_WBWIForPlain(const std::string& jstr) {
   json js = json::parse(jstr);
   const SidePluginRepo repo;
-  return new CSPP_WBWI_Factory(js, repo);
+  return new CSPP_WBWIFactory(js, repo);
 }
 } // ROCKSDB_NAMESPACE
