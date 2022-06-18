@@ -301,6 +301,129 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   void SetMaxBytes(size_t max_bytes) final { m_batch.SetMaxBytes(max_bytes); }
   size_t GetDataSize() const final { return m_batch.GetDataSize(); }
   size_t SubBatchCnt() final { return m_sub_batch_cnt; }
+
+  WBWIIterator::Result
+  FetchFromBatch(ColumnFamilyHandle* cfh, const Slice& userkey,
+                   Slice* value, MergeContext* mgcontext) {
+    uint32_t cf_id = cfh->GetID();
+    DefineLookupKey(lookup_key, cf_id, userkey);
+    // wtoken can also used for read
+    if (!m_trie.lookup(lookup_key, &m_wtoken)) {
+      return WBWIIterator::kNotFound;
+    }
+    auto vn = m_wtoken.value_of<VecNode>();
+    auto vec = (Elem*)m_trie.mem_get(vn.pos);
+    for (size_t idx = vn.num; idx; ) {
+      idx--;
+      OneRecord rec = ReadRecord(vec[idx]);
+      switch (rec.type) {
+        case kPutRecord:
+          *value = rec.value;
+          return WBWIIterator::kFound;
+        case kDeleteRecord:
+        case kSingleDeleteRecord:
+          return WBWIIterator::kDeleted;
+        case kMergeRecord:
+          mgcontext->PushOperand(rec.value);
+          break;
+        case kLogDataRecord:
+          break;  // ignore
+        case kXIDRecord:
+          break;  // ignore
+        default:
+          return WBWIIterator::kError;
+      }  // end switch statement
+    }
+    return WBWIIterator::kMergeInProgress;
+  }
+
+  Status MergeKey(DB* db, ColumnFamilyHandle* cfh0,
+                  const Slice& key, const Slice* value,
+                  std::string* result, const MergeContext& context) {
+    auto cfh = static_cast<ColumnFamilyHandleImpl*>(cfh0);
+    const auto merge_operator = cfh->cfd()->ioptions()->merge_operator.get();
+    if (UNLIKELY(merge_operator == nullptr)) {
+      return Status::InvalidArgument(
+          "Merge_operator must be set for column_family");
+    }
+    auto& idbo = static_cast<DBImpl*>(db->GetRootDB())->immutable_db_options();
+    auto* statistics = idbo.statistics.get();
+    auto* logger = idbo.info_log.get();
+    auto* clock = idbo.clock;
+    return MergeHelper::TimedFullMerge(merge_operator, key, value,
+                                       context.GetOperands(), result, logger,
+                                       statistics, clock);
+  }
+
+  Status GetFromBatchAndDB(DB* db, const ReadOptions& read_options,
+                           ColumnFamilyHandle* cfh, const Slice& key,
+                           PinnableSlice* pinnable_val, ReadCallback* callback)
+  override {
+    MergeContext mgcontext;
+    // Since the lifetime of the WriteBatch is the same as that of the transaction
+    // we cannot pin it as otherwise the returned value will not be available
+    // after the transaction finishes.
+    std::string& batch_value = *pinnable_val->GetSelf();
+    Slice oldest_put;
+    auto result = FetchFromBatch(cfh, key, &oldest_put, &mgcontext);
+    Status st;
+    switch (result) {
+    case WBWIIterator::kFound:
+      if (mgcontext.GetNumOperands() > 0) {
+        st = MergeKey(db, cfh, key, &oldest_put, &batch_value, mgcontext);
+        if (!st.ok())
+          return st;
+      }
+      else {
+        batch_value.assign(oldest_put.data_, oldest_put.size_);
+      }
+      pinnable_val->PinSelf();
+      break;
+    case WBWIIterator::kError:
+      st = Status::Corruption("CSPP_WBWI::FetchFromBatch returned error");
+      break;
+    case WBWIIterator::kDeleted:
+      if (mgcontext.GetNumOperands() > 0)
+        st = MergeKey(db, cfh, key, nullptr, &batch_value, mgcontext);
+      else
+        st = Status::NotFound();
+      break;
+    case WBWIIterator::kMergeInProgress:
+    case WBWIIterator::kNotFound:
+      // Did not find key in batch OR could not resolve Merges.  Try DB.
+      if (!callback) {
+        st = db->Get(read_options, cfh, key, pinnable_val);
+      } else {
+        DBImpl::GetImplOptions get_impl_options;
+        get_impl_options.column_family = cfh;
+        get_impl_options.value = pinnable_val;
+        get_impl_options.callback = callback;
+        auto root_db = static_cast<DBImpl*>(db->GetRootDB());
+        st = root_db->GetImpl(read_options, key, get_impl_options);
+      }
+      if (result == WBWIIterator::kMergeInProgress) {
+        if (st.ok() || st.IsNotFound()) {  // DB Get Succeeded
+          // Merge result from DB with merges in Batch
+          std::string merge_result;
+          if (st.ok()) {
+            st = MergeKey(db, cfh, key, pinnable_val, &merge_result, mgcontext);
+          } else {  // Key not present in db (s.IsNotFound())
+            st = MergeKey(db, cfh, key, nullptr, &merge_result, mgcontext);
+          }
+          if (st.ok()) {
+            pinnable_val->Reset();
+            pinnable_val->GetSelf()->assign(std::move(merge_result));
+            pinnable_val->PinSelf();
+          }
+        }
+      }
+      break;
+    default:
+      ROCKSDB_DIE("CSPP_WBWI::GetFromBatchAndDB: Unexpected");
+    }
+    return st;
+  }
+
   WBWIIterator* NewIterator(ColumnFamilyHandle* column_family) final;
   WBWIIterator* NewIterator() final;
   Iterator* NewIteratorWithBase(ColumnFamilyHandle*, Iterator* base,
