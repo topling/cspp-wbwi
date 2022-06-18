@@ -682,7 +682,6 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
     ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
     ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
-    ROCKSDB_JSON_SET_PROP(djs, live_iter_num);
     ROCKSDB_JSON_SET_SIZE(djs, avg_used_mem);
     ROCKSDB_JSON_SET_SIZE(djs, cumu_used_mem);
     JS_CSPP_WBWI_AddVersion(djs, JsonSmartBool(d, "html"));
@@ -694,6 +693,9 @@ CSPP_WBWI::Iter::Iter(CSPP_WBWI* tab, uint32_t cf_id) {
   m_iter = tab->m_trie.new_iter();
   m_cf_id = cf_id;
   m_last_entry_offset = tab->m_last_entry_offset;
+  auto factory = tab->m_fac;
+  as_atomic(factory->cumu_iter_num).fetch_add(1, std::memory_order_relaxed);
+  as_atomic(factory->live_iter_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(tab->m_live_iter_num).fetch_add(1, std::memory_order_relaxed);
 }
 CSPP_WBWI::Iter::~Iter() noexcept {
