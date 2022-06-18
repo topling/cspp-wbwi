@@ -304,7 +304,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
 
   WBWIIterator::Result
   FetchFromBatch(ColumnFamilyHandle* cfh, const Slice& userkey,
-                   Slice* value, MergeContext* mgcontext) {
+                 Slice* oldest_put, MergeContext* mgcontext) {
     uint32_t cf_id = cfh->GetID();
     DefineLookupKey(lookup_key, cf_id, userkey);
     // wtoken can also used for read
@@ -318,7 +318,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       OneRecord rec = ReadRecord(vec[idx]);
       switch (rec.type) {
         case kPutRecord:
-          *value = rec.value;
+          *oldest_put = rec.value;
           return WBWIIterator::kFound;
         case kDeleteRecord:
         case kSingleDeleteRecord:
@@ -338,8 +338,8 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   }
 
   Status MergeKey(DB* db, ColumnFamilyHandle* cfh0,
-                  const Slice& key, const Slice* value,
-                  std::string* result, const MergeContext& context) {
+                  const Slice& key, const Slice* origin_value,
+                  std::string* result, const MergeContext& mgcontext) {
     auto cfh = static_cast<ColumnFamilyHandleImpl*>(cfh0);
     const auto merge_operator = cfh->cfd()->ioptions()->merge_operator.get();
     if (UNLIKELY(merge_operator == nullptr)) {
@@ -350,8 +350,8 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     auto* statistics = idbo.statistics.get();
     auto* logger = idbo.info_log.get();
     auto* clock = idbo.clock;
-    return MergeHelper::TimedFullMerge(merge_operator, key, value,
-                                       context.GetOperands(), result, logger,
+    return MergeHelper::TimedFullMerge(merge_operator, key, origin_value,
+                                       mgcontext.GetOperands(), result, logger,
                                        statistics, clock);
   }
 
