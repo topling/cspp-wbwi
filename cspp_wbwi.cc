@@ -534,6 +534,12 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
   WriteBatchWithIndex* NewWriteBatchWithIndex(
       const Comparator* default_comparator, bool overwrite_key) final {
     if (default_comparator) {
+      if (!IsForwardBytewiseComparator(default_comparator)) {
+        // mainly for rocksdb unit test
+        static bool fallback = getEnvBool("CSPP_WBWI_Fallback", false);
+        if (fallback)
+          return new WriteBatchWithIndex(default_comparator, 0, overwrite_key, 0);
+      }
       ROCKSDB_VERIFY_F(IsForwardBytewiseComparator(default_comparator),
         "%s", default_comparator->Name());
     }
