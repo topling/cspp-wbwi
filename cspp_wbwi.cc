@@ -525,35 +525,34 @@ void JS_CSPP_WBWI_AddVersion(json& djs, bool html) {
 }
 ROCKSDB_ENUM_CLASS(HugePageEnum, uint8_t, kNone = 0, kMmap = 1, kTransparent = 2);
 struct CSPP_WBWIFactory final : public WBWIFactory {
+  bool allow_fallback = false; // mainly for rocksdb unit test
   size_t trie_reserve_cap = 64 << 10;
   size_t data_reserve_cap = 64 << 10;
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
   CSPP_WBWIFactory(const json& js, const SidePluginRepo& r) { Update({}, js, r); }
-  WriteBatchWithIndex* NewWriteBatchWithIndex(
-      const Comparator* default_comparator, bool overwrite_key) final {
-    if (default_comparator) {
-      if (!IsForwardBytewiseComparator(default_comparator)) {
-        // mainly for rocksdb unit test
-        static bool fallback = getEnvBool("CSPP_WBWI_Fallback", false);
-        if (fallback)
-          return new WriteBatchWithIndex(default_comparator, 0, overwrite_key, 0);
-      }
-      ROCKSDB_VERIFY_F(IsForwardBytewiseComparator(default_comparator),
-        "%s", default_comparator->Name());
+  WriteBatchWithIndex*
+  NewWriteBatchWithIndex(const Comparator* cmp, bool overwrite_key) final {
+    if (cmp && !IsForwardBytewiseComparator(cmp)) {
+      if (allow_fallback)
+        return new WriteBatchWithIndex(cmp, 0, overwrite_key, 0);
+      else
+        ROCKSDB_DIE("allow_fallback is false and cmp is '%s'", cmp->Name());
     }
     return new CSPP_WBWI(this, overwrite_key);
   }
   const char *Name() const noexcept final { return "CSPP_WBWI"; }
 //-----------------------------------------------------------------
   void Update(const json&, const json& js, const SidePluginRepo&) {
+    ROCKSDB_JSON_OPT_PROP(js, allow_fallback);
     ROCKSDB_JSON_OPT_SIZE(js, trie_reserve_cap);
     ROCKSDB_JSON_OPT_SIZE(js, data_reserve_cap);
   }
   std::string ToString(const json& d, const SidePluginRepo&) const {
     auto avg_used_mem = cumu_num ? cumu_used_mem / cumu_num : 0;
     json djs;
+    ROCKSDB_JSON_SET_PROP(djs, allow_fallback);
     ROCKSDB_JSON_SET_SIZE(djs, trie_reserve_cap);
     ROCKSDB_JSON_SET_SIZE(djs, data_reserve_cap);
     ROCKSDB_JSON_SET_PROP(djs, cumu_num);
