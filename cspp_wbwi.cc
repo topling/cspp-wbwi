@@ -722,9 +722,12 @@ CSPP_WBWI::~CSPP_WBWI() noexcept {
 void CSPP_WBWI::ClearIndex() {
   m_wtoken.release();
   m_wtoken.~SingleWriterToken();
+  //ROCKSDB_VERIFY_EQ(m_trie.live_iter_num(), 0);
+  size_t raw_iter_num = m_trie.live_iter_num();
   m_trie.~MainPatricia();
   new (&m_trie) MainPatricia(sizeof(VecNode), m_fac->trie_reserve_cap, Patricia::SingleThreadStrict);
   new (&m_wtoken) Patricia::SingleWriterToken();
+  m_trie.risk_set_live_iter_num(raw_iter_num);
   m_wtoken.acquire(&m_trie);
   m_last_entry_offset = 0;
   m_last_sub_batch_offset = 0;
