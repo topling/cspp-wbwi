@@ -656,7 +656,11 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
   uint64_t cumu_used_mem = 0;
   CSPP_WBWIFactory(const json& js, const SidePluginRepo& r) { Update({}, js, r); }
   WriteBatchWithIndex*
-  NewWriteBatchWithIndex(const Comparator* cmp, bool overwrite_key) final {
+  NewWriteBatchWithIndex(const Comparator* cmp, bool overwrite_key
+ #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 70060
+  , size_t prot
+ #endif
+  ) final {
     if (cmp && !IsForwardBytewiseComparator(cmp)) {
       if (allow_fallback)
         return new WriteBatchWithIndex(cmp, 0, overwrite_key, 0);
