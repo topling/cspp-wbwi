@@ -724,6 +724,9 @@ CSPP_WBWI::~CSPP_WBWI() noexcept {
   as_atomic(m_fac->live_num).fetch_sub(1, std::memory_order_relaxed);
 }
 void CSPP_WBWI::ClearIndex() {
+  if (0 == m_last_entry_offset) {
+    return;
+  }
   m_wtoken.release();
   m_wtoken.~SingleWriterToken();
   //ROCKSDB_VERIFY_EQ(m_trie.live_iter_num(), 0);
