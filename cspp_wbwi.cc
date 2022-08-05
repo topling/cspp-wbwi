@@ -305,6 +305,9 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   WBWIIterator::Result
   FetchFromBatch(ColumnFamilyHandle* cfh, const Slice& userkey,
                  Slice* oldest_put, MergeContext* mgcontext) {
+    if (0 == m_last_entry_offset) {
+      return WBWIIterator::kNotFound;
+    }
     uint32_t cf_id = cfh->GetID();
     DefineLookupKey(lookup_key, cf_id, userkey);
     // wtoken can also used for read
@@ -519,6 +522,10 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
   }
   void Seek(const Slice& userkey) final {
     m_last_entry_offset = m_tab->m_last_entry_offset;
+    if (0 == m_last_entry_offset) return;
+    if (UNLIKELY(!m_iter)) {
+      m_iter = m_tab->m_trie.new_iter();
+    }
     DefineLookupKey(lookup_key, m_cf_id, userkey);
     if (UNLIKELY(!m_iter->seek_lower_bound(lookup_key))) {
       m_idx = -1;
@@ -531,6 +538,10 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
   }
   void SeekForPrev(const Slice& userkey) final {
     m_last_entry_offset = m_tab->m_last_entry_offset;
+    if (0 == m_last_entry_offset) return;
+    if (UNLIKELY(!m_iter)) {
+      m_iter = m_tab->m_trie.new_iter();
+    }
     DefineLookupKey(lookup_key, m_cf_id, userkey);
     if (UNLIKELY(!m_iter->seek_rev_lower_bound(lookup_key))) {
       m_idx = -1;
@@ -545,6 +556,10 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
   }
   void SeekToFirst() final {
     m_last_entry_offset = m_tab->m_last_entry_offset;
+    if (0 == m_last_entry_offset) return;
+    if (UNLIKELY(!m_iter)) {
+      m_iter = m_tab->m_trie.new_iter();
+    }
     uint32_t big_cf_id = BIG_ENDIAN_OF(m_cf_id);
     fstring lookup_key((char*)&big_cf_id, 4);
     if (UNLIKELY(!m_iter->seek_lower_bound(lookup_key))) {
@@ -559,6 +574,10 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
   }
   void SeekToLast() final {
     m_last_entry_offset = m_tab->m_last_entry_offset;
+    if (0 == m_last_entry_offset) return;
+    if (UNLIKELY(!m_iter)) {
+      m_iter = m_tab->m_trie.new_iter();
+    }
     uint32_t big_next_cf_id = BIG_ENDIAN_OF(m_cf_id+1);
     fstring lookup_key((char*)&big_next_cf_id, 4);
     if (UNLIKELY(!m_iter->seek_rev_lower_bound(lookup_key))) {
@@ -694,7 +713,7 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
 };
 CSPP_WBWI::Iter::Iter(CSPP_WBWI* tab, uint32_t cf_id) {
   m_tab = tab;
-  m_iter = tab->m_trie.new_iter();
+  m_iter = nullptr;
   m_cf_id = cf_id;
   m_last_entry_offset = tab->m_last_entry_offset;
   auto factory = tab->m_fac;
@@ -703,7 +722,9 @@ CSPP_WBWI::Iter::Iter(CSPP_WBWI* tab, uint32_t cf_id) {
   as_atomic(tab->m_live_iter_num).fetch_add(1, std::memory_order_relaxed);
 }
 CSPP_WBWI::Iter::~Iter() noexcept {
-  m_iter->dispose();
+  if (m_iter) {
+    m_iter->dispose();
+  }
   auto factory = m_tab->m_fac;
   as_atomic(factory->live_iter_num).fetch_sub(1, std::memory_order_relaxed);
   as_atomic(m_tab->m_live_iter_num).fetch_sub(1, std::memory_order_relaxed);
