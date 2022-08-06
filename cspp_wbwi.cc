@@ -521,6 +521,7 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
     m_rec = m_tab->ReadRecord(m_vec[m_idx]);
   }
   void Seek(const Slice& userkey) final {
+    m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
     if (UNLIKELY(!m_iter)) {
@@ -528,15 +529,13 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
     }
     DefineLookupKey(lookup_key, m_cf_id, userkey);
     if (UNLIKELY(!m_iter->seek_lower_bound(lookup_key))) {
-      m_idx = -1;
       return; // fail
     }
     if (iter_cf_id() == m_cf_id)
       SetFirstEntry();
-    else
-      m_idx = -1;
   }
   void SeekForPrev(const Slice& userkey) final {
+    m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
     if (UNLIKELY(!m_iter)) {
@@ -544,17 +543,15 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
     }
     DefineLookupKey(lookup_key, m_cf_id, userkey);
     if (UNLIKELY(!m_iter->seek_rev_lower_bound(lookup_key))) {
-      m_idx = -1;
       return; // fail
     }
     if (m_iter->word() == lookup_key)
       SetFirstEntry();
     else if (iter_cf_id() == m_cf_id)
       SetLastEntry();
-    else
-      m_idx = -1;
   }
   void SeekToFirst() final {
+    m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
     if (UNLIKELY(!m_iter)) {
@@ -563,16 +560,15 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
     uint32_t big_cf_id = BIG_ENDIAN_OF(m_cf_id);
     fstring lookup_key((char*)&big_cf_id, 4);
     if (UNLIKELY(!m_iter->seek_lower_bound(lookup_key))) {
-      m_idx = -1;
       return; // fail
     }
     if (UNLIKELY(*(uint32_t*)m_iter->word().data() != big_cf_id)) {
-      m_idx = -1;
       return; // fail
     }
     SetFirstEntry();
   }
   void SeekToLast() final {
+    m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
     if (UNLIKELY(!m_iter)) {
@@ -581,18 +577,15 @@ struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
     uint32_t big_next_cf_id = BIG_ENDIAN_OF(m_cf_id+1);
     fstring lookup_key((char*)&big_next_cf_id, 4);
     if (UNLIKELY(!m_iter->seek_rev_lower_bound(lookup_key))) {
-      m_idx = -1;
       return; // fail
     }
     if (UNLIKELY(*(uint32_t*)m_iter->word().data() == big_next_cf_id)) {
       if (!m_iter->decr()) {
-        m_idx = -1;
         return; // fail
       }
     }
     if (iter_cf_id() != m_cf_id) {
       ROCKSDB_ASSERT_LT(iter_cf_id(), m_cf_id);
-      m_idx = -1;
       return; // fail
     }
     SetLastEntry();
