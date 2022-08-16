@@ -71,7 +71,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     VecNode vn = {0,0};
     if (m_trie.insert(lookup_key, &vn, &m_wtoken)) {
       vn.num = 1;
-      vn.pos = m_trie.mem_alloc(sizeof(Elem));
+      vn.pos = uint32_t(m_trie.mem_alloc(sizeof(Elem)));
       *(Elem*)m_trie.mem_get(vn.pos) = Elem(offset);
       m_wtoken.mutable_value_of<VecNode>() = vn;
     }
