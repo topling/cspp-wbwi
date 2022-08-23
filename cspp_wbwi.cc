@@ -308,7 +308,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     if (0 == m_last_entry_offset) {
       return WBWIIterator::kNotFound;
     }
-    uint32_t cf_id = cfh->GetID();
+    uint32_t cf_id = cfh ? cfh->GetID() : 0;
     DefineLookupKey(lookup_key, cf_id, userkey);
     // wtoken can also used for read
     if (!m_trie.lookup(lookup_key, &m_wtoken)) {
@@ -343,6 +343,9 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   Status MergeKey(DB* db, ColumnFamilyHandle* cfh0,
                   const Slice& key, const Slice* origin_value,
                   std::string* result, const MergeContext& mgcontext) {
+    if (UNLIKELY(nullptr == cfh0)) {
+      return Status::InvalidArgument("Must provide a column_family");
+    }
     auto cfh = static_cast<ColumnFamilyHandleImpl*>(cfh0);
     const auto merge_operator = cfh->cfd()->ioptions()->merge_operator.get();
     if (UNLIKELY(merge_operator == nullptr)) {
@@ -356,6 +359,62 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     return MergeHelper::TimedFullMerge(merge_operator, key, origin_value,
                                        mgcontext.GetOperands(), result, logger,
                                        statistics, clock);
+  }
+
+  Status MergeKey(const DBOptions& options, ColumnFamilyHandle* cfh0,
+                  const Slice& key, const Slice* origin_value,
+                  std::string* result, const MergeContext& mgcontext) {
+    if (UNLIKELY(nullptr == cfh0)) {
+      return Status::InvalidArgument("Must provide a column_family");
+    }
+    auto cfh = static_cast<ColumnFamilyHandleImpl*>(cfh0);
+    const auto merge_operator = cfh->cfd()->ioptions()->merge_operator.get();
+    if (UNLIKELY(merge_operator == nullptr)) {
+      return Status::InvalidArgument(
+          "Merge_operator must be set for column_family");
+    }
+    auto* statistics = options.statistics.get();
+    auto* logger = options.info_log.get();
+    auto* clock = options.env->GetSystemClock().get();
+    return MergeHelper::TimedFullMerge(merge_operator, key, origin_value,
+                                       mgcontext.GetOperands(), result, logger,
+                                       statistics, clock);
+  }
+
+  Status GetFromBatch(ColumnFamilyHandle* cfh, const DBOptions& options,
+                      const Slice& key, std::string* value) override {
+    MergeContext mgcontext;
+    Slice oldest_put;
+    auto result = FetchFromBatch(cfh, key, &oldest_put, &mgcontext);
+    Status st;
+    value->clear();
+    switch (result) {
+    case WBWIIterator::kFound:
+      if (mgcontext.GetNumOperands() > 0)
+        st = MergeKey(options, cfh, key, &oldest_put, value, mgcontext);
+      else
+        value->assign(oldest_put.data_, oldest_put.size_);
+      break;
+    case WBWIIterator::kError:
+      st = Status::Corruption("CSPP_WBWI::FetchFromBatch returned error");
+      break;
+    case WBWIIterator::kDeleted:
+      if (mgcontext.GetNumOperands() > 0)
+        st = MergeKey(options, cfh, key, nullptr, value, mgcontext);
+      else
+        st = Status::NotFound();
+      break;
+    case WBWIIterator::kMergeInProgress:
+      MergeKey(options, cfh, key, nullptr, value, mgcontext);
+      st = Status::MergeInProgress(); // rocksdb uint test assert this
+      break;
+    case WBWIIterator::kNotFound:
+      st = Status::NotFound();
+      break;
+    default:
+      ROCKSDB_DIE("Unexpected: result = %d", result);
+    }
+    return st;
   }
 
   Status GetFromBatchAndDB(DB* db, const ReadOptions& read_options,
@@ -422,7 +481,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       }
       break;
     default:
-      ROCKSDB_DIE("CSPP_WBWI::GetFromBatchAndDB: Unexpected");
+      ROCKSDB_DIE("Unexpected: result = %d", result);
     }
     return st;
   }
