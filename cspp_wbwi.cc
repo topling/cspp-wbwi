@@ -304,7 +304,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
 
   WBWIIterator::Result
   FetchFromBatch(ColumnFamilyHandle* cfh, const Slice& userkey,
-                 Slice* oldest_put, MergeContext* mgcontext) {
+                 Slice* newest_put, MergeContext* mgcontext) {
     if (0 == m_last_entry_offset) {
       return WBWIIterator::kNotFound;
     }
@@ -321,7 +321,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       OneRecord rec = ReadRecord(vec[idx]);
       switch (rec.type) {
         case kPutRecord:
-          *oldest_put = rec.value;
+          *newest_put = rec.value;
           return WBWIIterator::kFound;
         case kDeleteRecord:
         case kSingleDeleteRecord:
@@ -384,16 +384,16 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   Status GetFromBatch(ColumnFamilyHandle* cfh, const DBOptions& options,
                       const Slice& key, std::string* value) override {
     MergeContext mgcontext;
-    Slice oldest_put;
-    auto result = FetchFromBatch(cfh, key, &oldest_put, &mgcontext);
+    Slice newest_put;
+    auto result = FetchFromBatch(cfh, key, &newest_put, &mgcontext);
     Status st;
     value->clear();
     switch (result) {
     case WBWIIterator::kFound:
       if (mgcontext.GetNumOperands() > 0)
-        st = MergeKey(options, cfh, key, &oldest_put, value, mgcontext);
+        st = MergeKey(options, cfh, key, &newest_put, value, mgcontext);
       else
-        value->assign(oldest_put.data_, oldest_put.size_);
+        value->assign(newest_put.data_, newest_put.size_);
       break;
     case WBWIIterator::kError:
       st = Status::Corruption("CSPP_WBWI::FetchFromBatch returned error");
@@ -426,18 +426,18 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     // we cannot pin it as otherwise the returned value will not be available
     // after the transaction finishes.
     std::string& batch_value = *pinnable_val->GetSelf();
-    Slice oldest_put;
-    auto result = FetchFromBatch(cfh, key, &oldest_put, &mgcontext);
+    Slice newest_put;
+    auto result = FetchFromBatch(cfh, key, &newest_put, &mgcontext);
     Status st;
     switch (result) {
     case WBWIIterator::kFound:
       if (mgcontext.GetNumOperands() > 0) {
-        st = MergeKey(db, cfh, key, &oldest_put, &batch_value, mgcontext);
+        st = MergeKey(db, cfh, key, &newest_put, &batch_value, mgcontext);
         if (!st.ok())
           return st;
       }
       else {
-        batch_value.assign(oldest_put.data_, oldest_put.size_);
+        batch_value.assign(newest_put.data_, newest_put.size_);
       }
       pinnable_val->PinSelf();
       break;
