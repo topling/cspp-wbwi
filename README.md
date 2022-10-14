@@ -4,7 +4,7 @@
 ---------|-------------------
 **WBWI** | **W**rite**B**atch**W**ithIndex
 
-**CSPP_WBWI** is 10x+ faster than **SkipList**.
+**CSPP_WBWI** is 10x+ faster than **SkipList** with lower memory usage.
 
 **CSPP_WBWI** just support **BytewiseComparator**.
 
