@@ -793,7 +793,7 @@ CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key)
 }
 CSPP_WBWI::~CSPP_WBWI() noexcept {
   m_wtoken.release();
-  TERARK_ASSERT_EZ(m_live_iter_num);
+  TERARK_VERIFY_EZ(m_live_iter_num);
   as_atomic(m_fac->live_num).fetch_sub(1, std::memory_order_relaxed);
 }
 void CSPP_WBWI::ClearIndex() {
