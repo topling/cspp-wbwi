@@ -376,35 +376,40 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     return st;
   }
 
+  // semantically same with WriteBatchWithIndexInternal::GetFromBatch
   WBWIIterator::Result
   GetFromBatchRaw(DB* db, ColumnFamilyHandle* cfh, const Slice& key,
                   MergeContext* mgcontext, std::string* value, Status* s)
   override {
+    *s = Status::OK();
+    value->clear();
     Slice newest_put;
     auto result = FetchFromBatch(cfh, key, &newest_put, mgcontext);
-    value->clear();
     switch (result) {
     case WBWIIterator::kFound:
-      if (mgcontext->GetNumOperands() > 0)
+      if (mgcontext->GetNumOperands() > 0) {
         *s = MergeKey(db, cfh, key, &newest_put, value, *mgcontext);
-      else
+        if (!s->ok())
+          result = WBWIIterator::Result::kError;
+      }
+      else {
         value->assign(newest_put.data_, newest_put.size_);
+      }
       break;
     case WBWIIterator::kError:
       *s = Status::Corruption("CSPP_WBWI::FetchFromBatch returned error");
       break;
     case WBWIIterator::kDeleted:
-      if (mgcontext->GetNumOperands() > 0)
+      if (mgcontext->GetNumOperands() > 0) {
         *s = MergeKey(db, cfh, key, nullptr, value, *mgcontext);
-      else
-        *s = Status::NotFound();
+        if (s->ok())
+          result = WBWIIterator::Result::kFound;
+        else
+          result = WBWIIterator::Result::kError;
+      }
       break;
     case WBWIIterator::kMergeInProgress:
-      MergeKey(db, cfh, key, nullptr, value, *mgcontext);
-      *s = Status::MergeInProgress(); // rocksdb uint test assert this
-      break;
     case WBWIIterator::kNotFound:
-      *s = Status::NotFound();
       break;
     default:
       ROCKSDB_DIE("Unexpected: result = %d", result);
