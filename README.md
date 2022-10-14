@@ -1,8 +1,8 @@
 # cspp-wbwi
 
-**CSPP** is **C**rash **S**afe **P**arallel **P**atricia trie
-
-**WBWI** is **W**rite**B**atch**W**ithIndex
+**CSPP** | **C**rash **S**afe **P**arallel **P**atricia trie
+---------|-------------------
+**WBWI** | **W**rite**B**atch**W**ithIndex
 
 # configuration
 wbwi is defined in sideplugin namespace `WBWIFactory`.
