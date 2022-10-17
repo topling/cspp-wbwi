@@ -39,7 +39,6 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   mutable Patricia::SingleWriterToken m_wtoken;
   ReadableWriteBatch    m_batch;
   bool     m_overwrite_key;
-  uint32_t m_live_iter_num = 0;
   size_t   m_last_entry_offset = 0;
   size_t   m_last_sub_batch_offset = 0;
   size_t   m_sub_batch_cnt = 1;
@@ -492,6 +491,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
                                 const ReadOptions*) final;
   Iterator* NewIteratorWithBase(Iterator* base) final; // default cf
   struct Iter;
+  valvec<Iter*> m_live_iters;
 };
 struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
   Patricia::Iterator* m_iter;
@@ -771,7 +771,7 @@ CSPP_WBWI::Iter::Iter(CSPP_WBWI* tab, uint32_t cf_id) {
   auto factory = tab->m_fac;
   as_atomic(factory->cumu_iter_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(factory->live_iter_num).fetch_add(1, std::memory_order_relaxed);
-  as_atomic(tab->m_live_iter_num).fetch_add(1, std::memory_order_relaxed);
+  tab->m_live_iters.push_back(this);
 }
 CSPP_WBWI::Iter::~Iter() noexcept {
   if (m_iter) {
@@ -779,7 +779,11 @@ CSPP_WBWI::Iter::~Iter() noexcept {
   }
   auto factory = m_tab->m_fac;
   as_atomic(factory->live_iter_num).fetch_sub(1, std::memory_order_relaxed);
-  as_atomic(m_tab->m_live_iter_num).fetch_sub(1, std::memory_order_relaxed);
+  auto beg = m_tab->m_live_iters.begin();
+  auto end = m_tab->m_live_iters.end();
+  auto pos = std::remove(beg, end, this);
+  TERARK_VERIFY_EQ(end - pos, 1);
+  m_tab->m_live_iters.trim(pos);
 }
 CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key)
     : WriteBatchWithIndex(Slice()) // default cons placeholder with Slice
@@ -793,12 +797,15 @@ CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key)
 }
 CSPP_WBWI::~CSPP_WBWI() noexcept {
   m_wtoken.release();
-  TERARK_VERIFY_EZ(m_live_iter_num);
+  TERARK_VERIFY_EZ(m_live_iters.size());
   as_atomic(m_fac->live_num).fetch_sub(1, std::memory_order_relaxed);
 }
 void CSPP_WBWI::ClearIndex() {
   if (0 == m_last_entry_offset) {
     return;
+  }
+  for (auto iter : m_live_iters) {
+    iter->m_idx = -1; // set invalid
   }
   m_wtoken.release();
   m_wtoken.~SingleWriterToken();
