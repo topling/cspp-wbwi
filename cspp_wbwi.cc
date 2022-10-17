@@ -39,6 +39,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   mutable Patricia::SingleWriterToken m_wtoken;
   ReadableWriteBatch    m_batch;
   bool     m_overwrite_key;
+  uint32_t m_live_iter_num = 0;
   size_t   m_last_entry_offset = 0;
   size_t   m_last_sub_batch_offset = 0;
   size_t   m_sub_batch_cnt = 1;
@@ -491,9 +492,13 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
                                 const ReadOptions*) final;
   Iterator* NewIteratorWithBase(Iterator* base) final; // default cf
   struct Iter;
-  valvec<Iter*> m_live_iters;
+  struct IterLinkNode {
+    IterLinkNode* m_prev;
+    IterLinkNode* m_next;
+  };
+  IterLinkNode m_head;
 };
-struct CSPP_WBWI::Iter : public WBWIIterator, boost::noncopyable {
+struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   Patricia::Iterator* m_iter;
   CSPP_WBWI*  m_tab;
   uint32_t    m_cf_id = 0;
@@ -771,7 +776,14 @@ CSPP_WBWI::Iter::Iter(CSPP_WBWI* tab, uint32_t cf_id) {
   auto factory = tab->m_fac;
   as_atomic(factory->cumu_iter_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(factory->live_iter_num).fetch_add(1, std::memory_order_relaxed);
-  tab->m_live_iters.push_back(this);
+  tab->m_live_iter_num++;
+  // insert 'this' after tail
+  auto head = &tab->m_head; // dummy head
+  auto tail = head->m_prev; // old tail
+  this->m_next = head;
+  this->m_prev = tail;
+  tail->m_next = this;
+  head->m_prev = this;
 }
 CSPP_WBWI::Iter::~Iter() noexcept {
   if (m_iter) {
@@ -779,11 +791,11 @@ CSPP_WBWI::Iter::~Iter() noexcept {
   }
   auto factory = m_tab->m_fac;
   as_atomic(factory->live_iter_num).fetch_sub(1, std::memory_order_relaxed);
-  auto beg = m_tab->m_live_iters.begin();
-  auto end = m_tab->m_live_iters.end();
-  auto pos = std::remove(beg, end, this);
-  TERARK_VERIFY_EQ(end - pos, 1);
-  m_tab->m_live_iters.trim(pos);
+  m_tab->m_live_iter_num--;
+  TERARK_VERIFY_EQ(m_prev->m_next, this);
+  TERARK_VERIFY_EQ(m_next->m_prev, this);
+  m_prev->m_next = m_next; // remove 'this'
+  m_next->m_prev = m_prev; // from list
 }
 CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key)
     : WriteBatchWithIndex(Slice()) // default cons placeholder with Slice
@@ -794,19 +806,23 @@ CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key)
   m_wtoken.acquire(&m_trie);
   as_atomic(f->live_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(f->cumu_num).fetch_add(1, std::memory_order_relaxed);
+  m_head.m_next = m_head.m_prev = &m_head;
 }
 CSPP_WBWI::~CSPP_WBWI() noexcept {
   m_wtoken.release();
-  TERARK_VERIFY_EZ(m_live_iters.size());
+  TERARK_VERIFY_EZ(m_live_iter_num);
   as_atomic(m_fac->live_num).fetch_sub(1, std::memory_order_relaxed);
 }
 void CSPP_WBWI::ClearIndex() {
   if (0 == m_last_entry_offset) {
     return;
   }
-  for (auto iter : m_live_iters) {
-    iter->m_idx = -1; // set invalid
+  size_t cnt = 0;
+  for (auto iter = m_head.m_next; iter != &m_head; iter = iter->m_next) {
+    static_cast<Iter*>(iter)->m_idx = -1; // set invalid
+    cnt++;
   }
+  TERARK_VERIFY_EQ(cnt, m_live_iter_num);
   m_wtoken.release();
   m_wtoken.~SingleWriterToken();
   //ROCKSDB_VERIFY_EQ(m_trie.live_iter_num(), 0);
