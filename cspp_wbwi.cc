@@ -699,7 +699,7 @@ Iterator* CSPP_WBWI::NewIteratorWithBase(Iterator* base) {
   return new BaseDeltaIterator(nullptr, base, wbwiii, BytewiseComparator());
 }
 void JS_CSPP_WBWI_AddVersion(json& djs, bool html) {
-  auto& ver = djs["version"];
+  auto& ver = djs["cspp-wbwi"];
   const char* git_ver = git_version_hash_info_cspp_wbwi();
   if (html) {
     std::string topling_rocks = HtmlEscapeMin(strstr(git_ver, "commit ") + strlen("commit "));
