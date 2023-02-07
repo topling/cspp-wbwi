@@ -206,15 +206,14 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     uint32_t cf_id;
     Slice key, value, blob, xid;
   };
-  OneRecord ReadRecord(size_t offset) const {
+  void ReadRecord(size_t offset, OneRecord* p) const {
+    OneRecord& r = *p;
     Slice input = Slice(m_batch.Data()).substr(offset);
-    OneRecord r;
     static_assert(sizeof(r.tag) == 1);
     Status s = ReadRecordFromWriteBatch(&input, (char*)&r.tag, &r.cf_id, &r.key,
                                         &r.value, &r.blob, &r.xid);
     TERARK_VERIFY_S(s.ok(), "%s", s.ToString());
     r.type = WriteTypeOf(r.tag);
-    return r;
   }
   using WriteBatchWithIndex::Put;
   Status Put(ColumnFamilyHandle* cfh, const Slice& key, const Slice& value) final {
@@ -316,9 +315,10 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     }
     auto vn = m_wtoken.value_of<VecNode>();
     auto vec = (Elem*)m_trie.mem_get(vn.pos);
+    OneRecord rec;
     for (size_t idx = vn.num; idx; ) {
       idx--;
-      OneRecord rec = ReadRecord(vec[idx]);
+      ReadRecord(vec[idx], &rec);
       switch (rec.type) {
         case kPutRecord:
           *newest_put = rec.value;
@@ -518,7 +518,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     m_idx = 0;
     m_num = vn.num;
     m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
-    m_rec = m_tab->ReadRecord(m_vec[0]);
+    m_tab->ReadRecord(m_vec[0], &m_rec);
     assert(iter_cf_id() == m_cf_id);
     assert(m_iter->word().substr(4) == m_rec.key);
   }
@@ -527,7 +527,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     m_idx = vn.num - 1;
     m_num = vn.num;
     m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
-    m_rec = m_tab->ReadRecord(m_vec[m_idx]);
+    m_tab->ReadRecord(m_vec[m_idx], &m_rec);
     assert(iter_cf_id() == m_cf_id);
     assert(m_iter->word().substr(4) == m_rec.key);
   }
@@ -548,7 +548,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
       m_num = vn.num;
       if (UpdateRecordCache)
-        m_rec = m_tab->ReadRecord(m_vec[m_idx]);
+        m_tab->ReadRecord(m_vec[m_idx], &m_rec);
     }
   }
   WriteEntry Entry() const final {
@@ -569,7 +569,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       m_num = vn.num;
       m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
     }
-    m_rec = m_tab->ReadRecord(m_vec[m_idx]);
+    m_tab->ReadRecord(m_vec[m_idx], &m_rec);
   }
   void Prev() final {
     TERARK_ASSERT_GE(m_idx, 0);
@@ -582,7 +582,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       m_num = vn.num;
       m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
     }
-    m_rec = m_tab->ReadRecord(m_vec[m_idx]);
+    m_tab->ReadRecord(m_vec[m_idx], &m_rec);
   }
   void Seek(const Slice& userkey) final {
     m_idx = -1;
@@ -679,16 +679,11 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     const_cast<Iter*>(this)->CheckUpdates<true>();
     return m_rec.key == key;
   }
-  Result FindLatestUpdate(const Slice& key, MergeContext* mgctx) final {
+  terark_forceinline
+  Result FindLatestUpdateImpl(MergeContext* mgctx) {
     Result result = WBWIIteratorImpl::kNotFound;
-    mgctx->Clear();
-    if (!Valid()) {
-      return result;
-    } else if (!EqualsKey(key)) {
-      return result;
-    }
     for (m_idx = m_num - 1; m_idx >= 0; m_idx--) {
-      m_rec = m_tab->ReadRecord(m_vec[m_idx]);
+      m_tab->ReadRecord(m_vec[m_idx], &m_rec);
       switch (m_rec.type) {
       case kPutRecord:
         return WBWIIteratorImpl::kFound;
@@ -709,14 +704,24 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       }
     }
     m_idx = 0;
-    m_rec = m_tab->ReadRecord(m_vec[0]);
+    m_tab->ReadRecord(m_vec[0], &m_rec);
     return result;
   }
+  ROCKSDB_FLATTEN
+  Result FindLatestUpdate(const Slice& key, MergeContext* mgctx) final {
+    mgctx->Clear();
+    if (!Valid()) {
+      return WBWIIteratorImpl::kNotFound;
+    } else if (!EqualsKey(key)) {
+      return WBWIIteratorImpl::kNotFound;
+    }
+    return FindLatestUpdateImpl(mgctx);
+  }
   ROCKSDB_FLATTEN Result FindLatestUpdate(MergeContext* mgctx) final {
+    mgctx->Clear();
     if (Valid()) {
-      return FindLatestUpdate(m_rec.key, mgctx);
+      return FindLatestUpdateImpl(mgctx);
     } else {
-      mgctx->Clear();
       return WBWIIteratorImpl::kNotFound;
     }
   }
