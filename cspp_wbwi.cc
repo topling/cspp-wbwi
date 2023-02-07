@@ -679,6 +679,47 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     const_cast<Iter*>(this)->CheckUpdates<true>();
     return m_rec.key == key;
   }
+  Result FindLatestUpdate(const Slice& key, MergeContext* mgctx) final {
+    Result result = WBWIIteratorImpl::kNotFound;
+    mgctx->Clear();
+    if (!Valid()) {
+      return result;
+    } else if (!EqualsKey(key)) {
+      return result;
+    }
+    for (m_idx = m_num - 1; m_idx >= 0; m_idx--) {
+      m_rec = m_tab->ReadRecord(m_vec[m_idx]);
+      switch (m_rec.type) {
+      case kPutRecord:
+        return WBWIIteratorImpl::kFound;
+      case kDeleteRecord:
+        return WBWIIteratorImpl::kDeleted;
+      case kSingleDeleteRecord:
+        return WBWIIteratorImpl::kDeleted;
+      case kMergeRecord:
+        result = WBWIIteratorImpl::kMergeInProgress;
+        mgctx->PushOperand(m_rec.value);
+        break;
+      case kLogDataRecord:
+        break;  // ignore
+      case kXIDRecord:
+        break;  // ignore
+      default:
+        return WBWIIteratorImpl::kError;
+      }
+    }
+    m_idx = 0;
+    m_rec = m_tab->ReadRecord(m_vec[0]);
+    return result;
+  }
+  ROCKSDB_FLATTEN Result FindLatestUpdate(MergeContext* mgctx) final {
+    if (Valid()) {
+      return FindLatestUpdate(m_rec.key, mgctx);
+    } else {
+      mgctx->Clear();
+      return WBWIIteratorImpl::kNotFound;
+    }
+  }
 };
 WBWIIterator* CSPP_WBWI::NewIterator(ColumnFamilyHandle* cfh) {
   return new Iter(this, GetColumnFamilyID(cfh));
