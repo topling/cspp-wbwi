@@ -682,7 +682,8 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   terark_forceinline
   Result FindLatestUpdateImpl(MergeContext* mgctx) {
     Result result = WBWIIteratorImpl::kNotFound;
-    for (m_idx = m_num - 1; m_idx >= 0; m_idx--) {
+    for (m_idx = m_num; m_idx > 0;) {
+      m_idx--;
       m_tab->ReadRecord(m_vec[m_idx], &m_rec);
       switch (m_rec.type) {
       case kPutRecord:
@@ -703,8 +704,6 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
         return WBWIIteratorImpl::kError;
       }
     }
-    m_idx = 0;
-    m_tab->ReadRecord(m_vec[0], &m_rec);
     return result;
   }
   ROCKSDB_FLATTEN
