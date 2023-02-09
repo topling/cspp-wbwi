@@ -205,14 +205,20 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     WriteType type;
     uint32_t cf_id;
     Slice key, value, blob, xid;
+    void Read(const char* input, const char* limit);
   };
   void ReadRecord(size_t offset, OneRecord* p) const {
     OneRecord& r = *p;
+  #if 0
     Slice input = Slice(m_batch.Data()).substr(offset);
     static_assert(sizeof(r.tag) == 1);
     Status s = ReadRecordFromWriteBatch(&input, (char*)&r.tag, &r.cf_id, &r.key,
                                         &r.value, &r.blob, &r.xid);
     TERARK_VERIFY_S(s.ok(), "%s", s.ToString());
+  #else
+    Slice all = m_batch.Data();
+    p->Read(all.data_ + offset, all.end());
+  #endif
     r.type = WriteTypeOf(r.tag);
   }
   using WriteBatchWithIndex::Put;
@@ -888,4 +894,84 @@ WBWIFactory* NewCSPP_WBWIForPlain(const std::string& jstr) {
   const SidePluginRepo repo;
   return new CSPP_WBWIFactory(js, repo);
 }
+
+void CSPP_WBWI::OneRecord::Read(const char* input, const char* limit) {
+  tag = ValueType(*input++);
+  cf_id = 0;  // default cf
+  uint32_t u32 = 0;
+  #define ReadSlice(s, errmsg) s.data_ = input = GetVarint32Ptr(input, limit, &u32); s.size_ = u32; ROCKSDB_VERIFY_F(nullptr != input, errmsg); input += u32;
+  #define Read_cf_id(errmsg) input = GetVarint32Ptr(input, limit, &cf_id); ROCKSDB_VERIFY_F(nullptr != input, errmsg)
+  switch (tag) {
+    case kTypeColumnFamilyValue:
+      Read_cf_id("bad WriteBatch Put");
+      FALLTHROUGH_INTENDED;
+    case kTypeValue:
+      ReadSlice(key, "bad WriteBatch Put");
+      ReadSlice(value, "bad WriteBatch Put");
+      break;
+    case kTypeColumnFamilyDeletion:
+    case kTypeColumnFamilySingleDeletion:
+      Read_cf_id("bad WriteBatch Delete");
+      FALLTHROUGH_INTENDED;
+    case kTypeDeletion:
+    case kTypeSingleDeletion:
+      ReadSlice(key, "bad WriteBatch Delete");
+      break;
+    case kTypeColumnFamilyRangeDeletion:
+      Read_cf_id("bad WriteBatch DeleteRange");
+      FALLTHROUGH_INTENDED;
+    case kTypeRangeDeletion:
+      // for range delete, "key" is begin_key, "value" is end_key
+      ReadSlice(key, "bad WriteBatch DeleteRange");
+      ReadSlice(value, "bad WriteBatch DeleteRange");
+      break;
+    case kTypeColumnFamilyMerge:
+      Read_cf_id("bad WriteBatch Merge");
+      FALLTHROUGH_INTENDED;
+    case kTypeMerge:
+      ReadSlice(key, "bad WriteBatch Merge");
+      ReadSlice(value, "bad WriteBatch Merge");
+      break;
+    case kTypeColumnFamilyBlobIndex:
+      Read_cf_id("bad WriteBatch BlobIndex");
+      FALLTHROUGH_INTENDED;
+    case kTypeBlobIndex:
+      ReadSlice(key, "bad WriteBatch BlobIndex");
+      ReadSlice(value, "bad WriteBatch BlobIndex");
+      break;
+    case kTypeLogData:
+      ReadSlice(blob, "bad WriteBatch Blob");
+      break;
+    case kTypeNoop:
+    case kTypeBeginPrepareXID:
+      // This indicates that the prepared batch is also persisted in the db.
+      // This is used in WritePreparedTxn
+    case kTypeBeginPersistedPrepareXID:
+      // This is used in WriteUnpreparedTxn
+    case kTypeBeginUnprepareXID:
+      break;
+    case kTypeEndPrepareXID:
+      ReadSlice(xid, "bad EndPrepare XID");
+      break;
+    case kTypeCommitXIDAndTimestamp:
+      ReadSlice(key, "bad commit timestamp");
+      FALLTHROUGH_INTENDED;
+    case kTypeCommitXID:
+      ReadSlice(xid, "bad Commit XID");
+      break;
+    case kTypeRollbackXID:
+      ReadSlice(xid, "bad Rollback XID");
+      break;
+    case kTypeColumnFamilyWideColumnEntity:
+      Read_cf_id("bad WriteBatch PutEntity");
+      FALLTHROUGH_INTENDED;
+    case kTypeWideColumnEntity:
+      ReadSlice(key, "bad WriteBatch PutEntity");
+      ReadSlice(value, "bad WriteBatch PutEntity");
+      break;
+    default:
+      ROCKSDB_DIE("bad WriteBatch tag = %s", enum_cstr(ValueType(tag)));
+  }
+}
+
 } // ROCKSDB_NAMESPACE
