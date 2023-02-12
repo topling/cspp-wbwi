@@ -205,7 +205,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     WriteType type;
     uint32_t cf_id;
     Slice key, value, blob, xid;
-    void Read(const char* input, const char* limit);
+    const char* Read(const char* input);
   };
   void ReadRecord(size_t offset, OneRecord* p) const {
   #if 0
@@ -217,8 +217,8 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     TERARK_VERIFY_S(s.ok(), "%s", s.ToString());
     r.type = WriteTypeOf(r.tag);
   #else
-    Slice all = m_batch.Data();
-    p->Read(all.data_ + offset, all.end());
+    auto rec_end __attribute__((__unused__)) = p->Read(m_batch.Data().data() + offset);
+    ROCKSDB_ASSERT_LE(rec_end, Slice(m_batch.Data()).end());
   #endif
   }
   using WriteBatchWithIndex::Put;
@@ -895,12 +895,38 @@ WBWIFactory* NewCSPP_WBWIForPlain(const std::string& jstr) {
   return new CSPP_WBWIFactory(js, repo);
 }
 
-void CSPP_WBWI::OneRecord::Read(const char* input, const char* limit) {
+static const char* GetVarUint32PtrFallback(const char* p, uint32_t* value) {
+  uint32_t result = 0;
+  for (uint32_t shift = 0; shift <= 28; shift += 7) {
+    uint32_t byte = *(reinterpret_cast<const unsigned char*>(p));
+    p++;
+    if (byte & 128) {
+      // More bytes are present
+      result |= ((byte & 127) << shift);
+    } else {
+      result |= (byte << shift);
+      *value = result;
+      return reinterpret_cast<const char*>(p);
+    }
+  }
+  return nullptr;
+}
+
+inline const char* GetVarUint32Ptr(const char* p, uint32_t* value) {
+  uint32_t result = *(reinterpret_cast<const unsigned char*>(p));
+  if ((result & 128) == 0) {
+    *value = result;
+    return p + 1;
+  }
+  return GetVarUint32PtrFallback(p, value);
+}
+
+const char* CSPP_WBWI::OneRecord::Read(const char* input) {
   tag = ValueType(*input++);
   cf_id = 0;  // default cf
   uint32_t u32 = 0;
-  #define ReadSlice(s, errmsg) s.data_ = input = GetVarint32Ptr(input, limit, &u32); s.size_ = u32; ROCKSDB_VERIFY_F(nullptr != input, errmsg); input += u32;
-  #define Read_cf_id(errmsg) input = GetVarint32Ptr(input, limit, &cf_id); ROCKSDB_VERIFY_F(nullptr != input, errmsg)
+  #define ReadSlice(s, errmsg) s.data_ = input = GetVarUint32Ptr(input, &u32); s.size_ = u32; ROCKSDB_VERIFY_F(nullptr != input, errmsg); input += u32;
+  #define Read_cf_id(errmsg) input = GetVarUint32Ptr(input, &cf_id); ROCKSDB_VERIFY_F(nullptr != input, errmsg)
   switch (tag) {
     case kTypeColumnFamilyValue:
       Read_cf_id("bad WriteBatch Put");
@@ -987,6 +1013,7 @@ void CSPP_WBWI::OneRecord::Read(const char* input, const char* limit) {
     default:
       ROCKSDB_DIE("bad WriteBatch tag = %s", enum_cstr(ValueType(tag)));
   }
+  return input;
 }
 
 } // ROCKSDB_NAMESPACE
