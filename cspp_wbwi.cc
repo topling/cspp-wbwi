@@ -208,18 +208,18 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     void Read(const char* input, const char* limit);
   };
   void ReadRecord(size_t offset, OneRecord* p) const {
-    OneRecord& r = *p;
   #if 0
+    OneRecord& r = *p;
     Slice input = Slice(m_batch.Data()).substr(offset);
     static_assert(sizeof(r.tag) == 1);
     Status s = ReadRecordFromWriteBatch(&input, (char*)&r.tag, &r.cf_id, &r.key,
                                         &r.value, &r.blob, &r.xid);
     TERARK_VERIFY_S(s.ok(), "%s", s.ToString());
+    r.type = WriteTypeOf(r.tag);
   #else
     Slice all = m_batch.Data();
     p->Read(all.data_ + offset, all.end());
   #endif
-    r.type = WriteTypeOf(r.tag);
   }
   using WriteBatchWithIndex::Put;
   Status Put(ColumnFamilyHandle* cfh, const Slice& key, const Slice& value) final {
@@ -908,14 +908,20 @@ void CSPP_WBWI::OneRecord::Read(const char* input, const char* limit) {
     case kTypeValue:
       ReadSlice(key, "bad WriteBatch Put");
       ReadSlice(value, "bad WriteBatch Put");
+      this->type = kPutRecord;
       break;
     case kTypeColumnFamilyDeletion:
-    case kTypeColumnFamilySingleDeletion:
       Read_cf_id("bad WriteBatch Delete");
-      FALLTHROUGH_INTENDED;
     case kTypeDeletion:
-    case kTypeSingleDeletion:
       ReadSlice(key, "bad WriteBatch Delete");
+      this->type = kDeleteRecord;
+      break;
+    case kTypeColumnFamilySingleDeletion:
+      Read_cf_id("bad WriteBatch SingleDelete");
+      FALLTHROUGH_INTENDED;
+    case kTypeSingleDeletion:
+      ReadSlice(key, "bad WriteBatch SingleDelete");
+      this->type = kSingleDeleteRecord;
       break;
     case kTypeColumnFamilyRangeDeletion:
       Read_cf_id("bad WriteBatch DeleteRange");
@@ -924,6 +930,7 @@ void CSPP_WBWI::OneRecord::Read(const char* input, const char* limit) {
       // for range delete, "key" is begin_key, "value" is end_key
       ReadSlice(key, "bad WriteBatch DeleteRange");
       ReadSlice(value, "bad WriteBatch DeleteRange");
+      this->type = kUnknownRecord;
       break;
     case kTypeColumnFamilyMerge:
       Read_cf_id("bad WriteBatch Merge");
@@ -931,6 +938,7 @@ void CSPP_WBWI::OneRecord::Read(const char* input, const char* limit) {
     case kTypeMerge:
       ReadSlice(key, "bad WriteBatch Merge");
       ReadSlice(value, "bad WriteBatch Merge");
+      this->type = kMergeRecord;
       break;
     case kTypeColumnFamilyBlobIndex:
       Read_cf_id("bad WriteBatch BlobIndex");
@@ -938,9 +946,11 @@ void CSPP_WBWI::OneRecord::Read(const char* input, const char* limit) {
     case kTypeBlobIndex:
       ReadSlice(key, "bad WriteBatch BlobIndex");
       ReadSlice(value, "bad WriteBatch BlobIndex");
+      this->type = kUnknownRecord;
       break;
     case kTypeLogData:
       ReadSlice(blob, "bad WriteBatch Blob");
+      this->type = kLogDataRecord;
       break;
     case kTypeNoop:
     case kTypeBeginPrepareXID:
@@ -949,18 +959,22 @@ void CSPP_WBWI::OneRecord::Read(const char* input, const char* limit) {
     case kTypeBeginPersistedPrepareXID:
       // This is used in WriteUnpreparedTxn
     case kTypeBeginUnprepareXID:
+      this->type = kUnknownRecord;
       break;
     case kTypeEndPrepareXID:
       ReadSlice(xid, "bad EndPrepare XID");
+      this->type = kUnknownRecord;
       break;
     case kTypeCommitXIDAndTimestamp:
       ReadSlice(key, "bad commit timestamp");
       FALLTHROUGH_INTENDED;
     case kTypeCommitXID:
       ReadSlice(xid, "bad Commit XID");
+      this->type = kUnknownRecord;
       break;
     case kTypeRollbackXID:
       ReadSlice(xid, "bad Rollback XID");
+      this->type = kUnknownRecord;
       break;
     case kTypeColumnFamilyWideColumnEntity:
       Read_cf_id("bad WriteBatch PutEntity");
@@ -968,6 +982,7 @@ void CSPP_WBWI::OneRecord::Read(const char* input, const char* limit) {
     case kTypeWideColumnEntity:
       ReadSlice(key, "bad WriteBatch PutEntity");
       ReadSlice(value, "bad WriteBatch PutEntity");
+      this->type = kUnknownRecord;
       break;
     default:
       ROCKSDB_DIE("bad WriteBatch tag = %s", enum_cstr(ValueType(tag)));
