@@ -320,7 +320,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       return WBWIIterator::kNotFound;
     }
     auto vn = m_wtoken.value_of<VecNode>();
-    auto vec = (Elem*)m_trie.mem_get(vn.pos);
+    auto vec = (const Elem*)m_trie.mem_get(vn.pos);
     OneRecord rec;
     for (size_t idx = vn.num; idx; ) {
       idx--;
@@ -776,8 +776,8 @@ void JS_CSPP_WBWI_AddVersion(json& djs, bool html) {
 ROCKSDB_ENUM_CLASS(HugePageEnum, uint8_t, kNone = 0, kMmap = 1, kTransparent = 2);
 struct CSPP_WBWIFactory final : public WBWIFactory {
   bool allow_fallback = false; // mainly for rocksdb unit test
-  size_t trie_reserve_cap = 64 << 10;
-  size_t data_reserve_cap = 64 << 10;
+  size_t trie_reserve_cap = 0;
+  size_t data_reserve_cap = 0;
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
@@ -848,9 +848,11 @@ CSPP_WBWI::Iter::~Iter() noexcept {
   m_prev->m_next = m_next; // remove 'this'
   m_next->m_prev = m_prev; // from list
 }
+static constexpr auto ConLevel = Patricia::SingleThreadStrict;
+//static constexpr auto ConLevel = Patricia::SingleThreadShared;
 CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key)
     : WriteBatchWithIndex(Slice()) // default cons placeholder with Slice
-    , m_trie(sizeof(VecNode), f->trie_reserve_cap, Patricia::SingleThreadStrict)
+    , m_trie(sizeof(VecNode), f->trie_reserve_cap, ConLevel)
     , m_batch(f->data_reserve_cap) {
   m_overwrite_key = overwrite_key;
   m_fac = f;
@@ -876,10 +878,9 @@ void CSPP_WBWI::ClearIndex() {
   TERARK_VERIFY_EQ(cnt, m_live_iter_num);
   m_wtoken.release();
   m_wtoken.~SingleWriterToken();
-  //ROCKSDB_VERIFY_EQ(m_trie.live_iter_num(), 0);
   size_t raw_iter_num = m_trie.live_iter_num();
   m_trie.~MainPatricia();
-  new (&m_trie) MainPatricia(sizeof(VecNode), m_fac->trie_reserve_cap, Patricia::SingleThreadStrict);
+  new (&m_trie) MainPatricia(sizeof(VecNode), m_fac->trie_reserve_cap, ConLevel);
   new (&m_wtoken) Patricia::SingleWriterToken();
   m_trie.risk_set_live_iter_num(raw_iter_num);
   m_wtoken.acquire(&m_trie);
