@@ -73,7 +73,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       vn.num = 1;
       vn.pos = uint32_t(m_trie.mem_alloc(sizeof(Elem)));
       *(Elem*)m_trie.mem_get(vn.pos) = Elem(offset);
-      m_wtoken.mutable_value_of<VecNode>() = vn;
+      m_trie.mutable_value_of<VecNode>(m_wtoken) = vn;
     }
     else { // dup key, append on vector or overwirte last vector elem
       vn = m_wtoken.value_of<VecNode>();
@@ -88,7 +88,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       else {
         if (vn.num & (vn.num-1)) { // is not power of 2, has space
           vec[vn.num] = Elem(offset);
-          m_wtoken.mutable_value_of<VecNode>().num = vn.num + 1;
+          m_trie.mutable_value_of<VecNode>(m_wtoken).num = vn.num + 1;
         }
         else {
           size_t oldlen = sizeof(Elem) * vn.num;
@@ -97,7 +97,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
           vn.pos = (uint32_t)newpos;
           vec = (Elem*)m_trie.mem_get(newpos);
           vec[vn.num++] = Elem(offset);
-          m_wtoken.mutable_value_of<VecNode>() = vn;
+          m_trie.mutable_value_of<VecNode>(m_wtoken) = vn;
         }
       }
     }
@@ -319,7 +319,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     if (!m_trie.lookup(lookup_key, &m_wtoken)) {
       return WBWIIterator::kNotFound;
     }
-    auto vn = m_wtoken.value_of<VecNode>();
+    auto vn = m_trie.value_of<VecNode>(m_wtoken);
     auto vec = (const Elem*)m_trie.mem_get(vn.pos);
     OneRecord rec;
     for (size_t idx = vn.num; idx; ) {
@@ -520,7 +520,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     return NATIVE_OF_BIG_ENDIAN(bigendian_cf_id);
   }
   void SetFirstEntry() {
-    auto vn = m_iter->value_of<VecNode>();
+    auto vn = m_tab->m_trie.value_of<VecNode>(*m_iter);
     m_idx = 0;
     m_num = vn.num;
     m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
@@ -529,7 +529,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     assert(m_iter->word().substr(4) == m_rec.key);
   }
   void SetLastEntry() {
-    auto vn = m_iter->value_of<VecNode>();
+    auto vn = m_tab->m_trie.value_of<VecNode>(*m_iter);
     m_idx = vn.num - 1;
     m_num = vn.num;
     m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
@@ -549,7 +549,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       const fstring key((char*)memcpy(alloca(src.n), src.p, src.n), src.n);
       ROCKSDB_VERIFY(m_iter->seek_lower_bound(key));
       ROCKSDB_VERIFY(m_iter->word() == key);
-      auto vn = m_iter->value_of<VecNode>();
+      auto vn = m_tab->m_trie.value_of<VecNode>(*m_iter);
       ROCKSDB_ASSERT_LE(m_num, int(vn.num));
       m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
       m_num = vn.num;
@@ -570,7 +570,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
         m_idx = -1;
         return; // fail
       }
-      auto vn = m_iter->value_of<VecNode>();
+      auto vn = m_tab->m_trie.value_of<VecNode>(*m_iter);
       m_idx = 0;
       m_num = vn.num;
       m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
@@ -583,7 +583,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     if (m_idx-- == 0) {
       if (UNLIKELY(!m_iter->decr() || iter_cf_id() != m_cf_id))
         return; // fail
-      auto vn = m_iter->value_of<VecNode>();
+      auto vn = m_tab->m_trie.value_of<VecNode>(*m_iter);
       m_idx = vn.num - 1;
       m_num = vn.num;
       m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
