@@ -9,6 +9,7 @@
 #include "rocksdb/iterator.h"
 #include "util/cast_util.h"
 #include "util/string_util.h"
+#include <logging/logging.h>
 #include <rocksdb/utilities/write_batch_with_index.h>
 #include <utilities/write_batch_with_index/write_batch_with_index_internal.h>
 #include <topling/side_plugin_factory.h>
@@ -221,8 +222,28 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     ROCKSDB_ASSERT_LE(rec_end, Slice(m_batch.Data()).end());
   #endif
   }
+#define CHECK_BATCH_SPACE_1(key) \
+  if (UNLIKELY(m_batch.GetDataSize() + key.size_ + 8192 > UINT32_MAX)) { \
+    char msg[1024];  \
+    auto len = snprintf(msg, sizeof(msg), \
+      "%s:%d: %s: too large batch = %zd, " ROCKS_LOG_TOSTRING(key) " = %zd", \
+      RocksLogShorterFileName(__FILE__), __LINE__, BOOST_CURRENT_FUNCTION, \
+      m_batch.GetDataSize(), key.size_); \
+    return Status::InvalidArgument(Slice(msg, len)); \
+  }
+#define CHECK_BATCH_SPACE_2(key, value) \
+  if (UNLIKELY(m_batch.GetDataSize() + key.size_ + value.size_ + 8192 > UINT32_MAX)) { \
+    char msg[1024];  \
+    auto len = snprintf(msg, sizeof(msg), \
+      "%s:%d: %s: too large batch = %zd, key = %zd, value = %zd", \
+      RocksLogShorterFileName(__FILE__), __LINE__, BOOST_CURRENT_FUNCTION, \
+      m_batch.GetDataSize(), key.size_, value.size_); \
+    return Status::InvalidArgument(Slice(msg, len)); \
+  }
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   using WriteBatchWithIndex::Put;
   Status Put(ColumnFamilyHandle* cfh, const Slice& key, const Slice& value) final {
+    CHECK_BATCH_SPACE_2(key, value);
     SetLastEntryOffset();
     auto s = m_batch.Put(cfh, key, value);
     if (s.ok()) {
@@ -231,6 +252,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     return s;
   }
   Status Put(const Slice& key, const Slice& value) final {
+    CHECK_BATCH_SPACE_2(key, value);
     SetLastEntryOffset();
     auto s = m_batch.Put(key, value);
     if (s.ok()) {
@@ -240,6 +262,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   }
   using WriteBatchWithIndex::Delete;
   Status Delete(ColumnFamilyHandle* cfh, const Slice& key) final {
+    CHECK_BATCH_SPACE_1(key);
     SetLastEntryOffset();
     auto s = m_batch.Delete(cfh, key);
     if (s.ok()) {
@@ -248,6 +271,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     return s;
   }
   Status Delete(const Slice& key) final {
+    CHECK_BATCH_SPACE_1(key);
     SetLastEntryOffset();
     auto s = m_batch.Delete(key);
     if (s.ok()) {
@@ -257,6 +281,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   }
   using WriteBatchWithIndex::SingleDelete;
   Status SingleDelete(ColumnFamilyHandle* cfh, const Slice& key) final {
+    CHECK_BATCH_SPACE_1(key);
     SetLastEntryOffset();
     auto s = m_batch.SingleDelete(cfh, key);
     if (s.ok()) {
@@ -265,6 +290,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     return s;
   }
   Status SingleDelete(const Slice& key) final {
+    CHECK_BATCH_SPACE_1(key);
     SetLastEntryOffset();
     auto s = m_batch.SingleDelete(key);
     if (s.ok()) {
@@ -274,6 +300,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   }
   using WriteBatchWithIndex::Merge;
   Status Merge(ColumnFamilyHandle* cfh, const Slice& key, const Slice& value) final {
+    CHECK_BATCH_SPACE_2(key, value);
     SetLastEntryOffset();
     auto s = m_batch.Merge(cfh, key, value);
     if (s.ok()) {
@@ -282,6 +309,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     return s;
   }
   Status Merge(const Slice& key, const Slice& value) final {
+    CHECK_BATCH_SPACE_2(key, value);
     SetLastEntryOffset();
     auto s = m_batch.Merge(key, value);
     if (s.ok()) {
@@ -290,6 +318,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     return s;
   }
   Status PutLogData(const Slice& blob) final {
+    CHECK_BATCH_SPACE_1(blob);
     return m_batch.PutLogData(blob);
   }
   void SetSavePoint() final { m_batch.SetSavePoint(); }
