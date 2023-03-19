@@ -227,18 +227,20 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   if (UNLIKELY(m_batch.GetDataSize() + key.size_ + 8192 > m_max_cap)) { \
     char msg[1024];  \
     auto len = snprintf(msg, sizeof(msg), \
-      "%s:%d: %s: too large batch = %zd, " ROCKS_LOG_TOSTRING(key) " = %zd", \
-      RocksLogShorterFileName(__FILE__), __LINE__, BOOST_CURRENT_FUNCTION, \
-      m_batch.GetDataSize(), key.size_); \
+      "%s:%d: too large batch = %zd, " ROCKS_LOG_TOSTRING(key) " = %zd : %s", \
+      RocksLogShorterFileName(__FILE__), __LINE__, \
+      m_batch.GetDataSize(), key.size_, \
+      BOOST_CURRENT_FUNCTION); \
     return Status::InvalidArgument(Slice(msg, len)); \
   }
 #define CHECK_BATCH_SPACE_2(key, value) \
   if (UNLIKELY(m_batch.GetDataSize() + key.size_ + value.size_ + 8192 > m_max_cap)) { \
     char msg[1024];  \
     auto len = snprintf(msg, sizeof(msg), \
-      "%s:%d: %s: too large batch = %zd, key = %zd, value = %zd", \
-      RocksLogShorterFileName(__FILE__), __LINE__, BOOST_CURRENT_FUNCTION, \
-      m_batch.GetDataSize(), key.size_, value.size_); \
+      "%s:%d: too large batch = %zd, key = %zd, value = %zd : %s", \
+      RocksLogShorterFileName(__FILE__), __LINE__, \
+      m_batch.GetDataSize(), key.size_, value.size_, \
+      BOOST_CURRENT_FUNCTION); \
     return Status::InvalidArgument(Slice(msg, len)); \
   }
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
