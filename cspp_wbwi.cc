@@ -39,6 +39,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   mutable MainPatricia  m_trie;
   mutable Patricia::SingleWriterToken m_wtoken;
   ReadableWriteBatch    m_batch;
+  size_t   m_max_cap;
   bool     m_overwrite_key;
   uint32_t m_live_iter_num = 0;
   size_t   m_last_entry_offset = 0;
@@ -223,7 +224,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   #endif
   }
 #define CHECK_BATCH_SPACE_1(key) \
-  if (UNLIKELY(m_batch.GetDataSize() + key.size_ + 8192 > UINT32_MAX)) { \
+  if (UNLIKELY(m_batch.GetDataSize() + key.size_ + 8192 > m_max_cap)) { \
     char msg[1024];  \
     auto len = snprintf(msg, sizeof(msg), \
       "%s:%d: %s: too large batch = %zd, " ROCKS_LOG_TOSTRING(key) " = %zd", \
@@ -232,7 +233,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     return Status::InvalidArgument(Slice(msg, len)); \
   }
 #define CHECK_BATCH_SPACE_2(key, value) \
-  if (UNLIKELY(m_batch.GetDataSize() + key.size_ + value.size_ + 8192 > UINT32_MAX)) { \
+  if (UNLIKELY(m_batch.GetDataSize() + key.size_ + value.size_ + 8192 > m_max_cap)) { \
     char msg[1024];  \
     auto len = snprintf(msg, sizeof(msg), \
       "%s:%d: %s: too large batch = %zd, key = %zd, value = %zd", \
@@ -807,6 +808,7 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
   bool allow_fallback = false; // mainly for rocksdb unit test
   size_t trie_reserve_cap = 0;
   size_t data_reserve_cap = 0;
+  size_t data_max_cap = 2 << 30; // 2G, max allowed is 4G
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
@@ -831,6 +833,9 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
     ROCKSDB_JSON_OPT_PROP(js, allow_fallback);
     ROCKSDB_JSON_OPT_SIZE(js, trie_reserve_cap);
     ROCKSDB_JSON_OPT_SIZE(js, data_reserve_cap);
+    ROCKSDB_JSON_OPT_SIZE(js, data_max_cap);
+    minimize(data_max_cap, UINT32_MAX);
+    minimize(data_reserve_cap, data_max_cap);
   }
   std::string ToString(const json& d, const SidePluginRepo&) const {
     auto avg_used_mem = cumu_num ? cumu_used_mem / cumu_num : 0;
@@ -838,6 +843,7 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
     ROCKSDB_JSON_SET_PROP(djs, allow_fallback);
     ROCKSDB_JSON_SET_SIZE(djs, trie_reserve_cap);
     ROCKSDB_JSON_SET_SIZE(djs, data_reserve_cap);
+    ROCKSDB_JSON_SET_SIZE(djs, data_max_cap);
     ROCKSDB_JSON_SET_PROP(djs, cumu_num);
     ROCKSDB_JSON_SET_PROP(djs, live_num);
     ROCKSDB_JSON_SET_PROP(djs, cumu_iter_num);
@@ -885,6 +891,7 @@ CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key)
     , m_batch(f->data_reserve_cap) {
   m_overwrite_key = overwrite_key;
   m_fac = f;
+  m_max_cap = f->data_max_cap;
   m_wtoken.acquire(&m_trie);
   as_atomic(f->live_num).fetch_add(1, std::memory_order_relaxed);
   as_atomic(f->cumu_num).fetch_add(1, std::memory_order_relaxed);
