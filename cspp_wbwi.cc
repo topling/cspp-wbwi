@@ -594,6 +594,12 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     const_cast<Iter*>(this)->CheckUpdates<true>();
     return {m_rec.type, m_rec.key, m_rec.value};
   }
+  Slice user_key() const final {
+    TERARK_ASSERT_BT(m_idx, 0, m_num);
+    fstring k = m_iter->word();
+    assert(Slice(k.p + 4, k.n - 4) == Entry().key);
+    return Slice(k.p + 4, k.n - 4);
+  }
   void Next() final {
     TERARK_ASSERT_GE(m_idx, 0);
     CheckUpdates<false>();
