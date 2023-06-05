@@ -699,24 +699,26 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     SetLastEntry();
   }
   // Moves the iterator to first entry of the previous key.
-  void PrevKey() final {
+  bool PrevKey() final {
     CheckUpdates<false>();
     TERARK_ASSERT_GE(m_idx, 0);
     if (UNLIKELY(!m_iter->decr() || iter_cf_id() != m_cf_id)) {
       m_idx = -1;
-      return; // fail
+      return false; // fail
     }
     SetFirstEntry();
+    return true;
   }
   // Moves the iterator to first entry of the next key.
-  void NextKey() final {
+  bool NextKey() final {
     CheckUpdates<false>();
     TERARK_ASSERT_GE(m_idx, 0);
     if (UNLIKELY(!m_iter->incr() || iter_cf_id() != m_cf_id)) {
       m_idx = -1;
-      return; // fail
+      return false; // fail
     }
     SetFirstEntry();
+    return true;
   }
   bool EqualsKey(const Slice& key) const final {
     TERARK_ASSERT_GE(m_idx, 0);
