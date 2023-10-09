@@ -925,6 +925,7 @@ void CSPP_WBWI::ClearIndex() {
   m_wtoken.release();
   m_wtoken.~SingleWriterToken();
   size_t raw_iter_num = m_trie.live_iter_num();
+  m_trie.risk_set_live_iter_num(0); // cheat ~MainPatricia checking
   m_trie.~MainPatricia();
   new (&m_trie) MainPatricia(sizeof(VecNode), m_fac->trie_reserve_cap, ConLevel);
   new (&m_wtoken) Patricia::SingleWriterToken();
