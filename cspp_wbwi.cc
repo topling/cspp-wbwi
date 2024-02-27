@@ -492,7 +492,8 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     case WBWIIterator::kNotFound:
       // Did not find key in batch OR could not resolve Merges.  Try DB.
       if (!callback) {
-        st = db->Get(read_options, cfh, key, pinnable_val);
+        // call timestamp version Get to reduc a Get forward call
+        st = db->Get(read_options, cfh, key, pinnable_val, nullptr/*timestamp*/);
       } else {
         DBImpl::GetImplOptions get_impl_options;
         get_impl_options.column_family = cfh;
