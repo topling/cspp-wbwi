@@ -801,7 +801,7 @@ void JS_CSPP_WBWI_AddVersion(json& djs, bool html) {
       return terark::fstring(&*pos, s.end() - pos);
     };
     auto topling_rocks_sha_end = std::find_if(topling_rocks.begin(), topling_rocks.end(), &isspace);
-    terark::string_appender<> oss_rocks;
+    terark::string_appender<> oss_rocks(valvec_reserve(), 512);
     oss_rocks|"<pre>"
              |"<a href='https://github.com/topling/cspp-wbwi/commit/"
              |headstr(topling_rocks, topling_rocks_sha_end)|"'>"
