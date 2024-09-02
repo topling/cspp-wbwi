@@ -986,6 +986,7 @@ const char* CSPP_WBWI::OneRecord::Read(const char* input) {
       break;
     case kTypeColumnFamilyDeletion:
       Read_cf_id("bad WriteBatch Delete");
+      FALLTHROUGH_INTENDED;
     case kTypeDeletion:
       ReadSlice(key, "bad WriteBatch Delete");
       this->type = kDeleteRecord;
