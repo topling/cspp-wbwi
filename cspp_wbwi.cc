@@ -127,6 +127,14 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         return kMergeRecord;
       case kTypeLogData:
         return kLogDataRecord;
+      case kTypeColumnFamilyWideColumnEntity:
+      case kTypeWideColumnEntity:
+    #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+        return kPutEntityRecord;
+    #else
+        ROCKSDB_DIE("Not Supported: must be version 8.10+");
+    #endif
+        break;
       case kTypeBeginPrepareXID:
       case kTypeBeginPersistedPrepareXID:
       case kTypeBeginUnprepareXID:
@@ -191,6 +199,15 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         case kTypeCommitXIDAndTimestamp:
         case kTypeRollbackXID:
         case kTypeNoop:
+          break;
+        case kTypeColumnFamilyWideColumnEntity:
+        case kTypeWideColumnEntity:
+      #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+          found++;
+          AddOrUpdateIndex(cf_id, kPutEntityRecord);
+      #else
+          ROCKSDB_DIE("Not Supported: must be version 8.10+");
+      #endif
           break;
         default:
           return Status::Corruption("unknown WriteBatch tag in ReBuildIndex",
@@ -263,6 +280,22 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     }
     return s;
   }
+#if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+  using WriteBatchWithIndex::PutEntity;
+  Status PutEntity(ColumnFamilyHandle* cfh, const Slice& key,
+                   const WideColumns& columns) override {
+    struct dummy { size_t size_; } vsize{0}; // size_ only
+    for (auto& x : columns)
+      vsize.size_ += x.name().size() + x.value().size() + 10;
+    CHECK_BATCH_SPACE_2(key, vsize);
+    SetLastEntryOffset();
+    auto s = m_batch.PutEntity(cfh, key, columns);
+    if (s.ok()) {
+      AddOrUpdateIndexCFH(cfh, kPutEntityRecord);
+    }
+    return s;
+  }
+#endif
   using WriteBatchWithIndex::Delete;
   Status Delete(ColumnFamilyHandle* cfh, const Slice& key) final {
     CHECK_BATCH_SPACE_1(key);
@@ -361,6 +394,11 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         case kPutRecord:
           *newest_put = rec.value;
           return WBWIIterator::kFound;
+      #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+        case kPutEntityRecord:
+          *newest_put = rec.value;
+          return WBWIIterator::kFoundEntity;
+      #endif
         case kDeleteRecord:
         case kSingleDeleteRecord:
           return WBWIIterator::kDeleted;
@@ -392,6 +430,20 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       else
         value->assign(newest_put.data_, newest_put.size_);
       break;
+  #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+    case WBWIIterator::kFoundEntity:
+      if (mgcontext.GetNumOperands() > 0)
+        st = WriteBatchWithIndexInternal::MergeKeyWithBaseValue(
+            cfh, key, MergeHelper::kWideBaseValue, newest_put,
+            mgcontext, value, static_cast<PinnableWideColumns*>(nullptr));
+      else {
+        Slice dv; // deserialized default column value
+        st = WideColumnSerialization::GetValueOfDefaultColumn(newest_put, dv);
+        if (st.ok())
+          value->assign(dv.data(), dv.size());
+      }
+      break;
+  #endif
     case WBWIIterator::kError:
       st = Status::Corruption("CSPP_WBWI::FetchFromBatch returned error");
       break;
@@ -434,6 +486,21 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         value->assign(newest_put.data_, newest_put.size_);
       }
       break;
+  #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+    case WBWIIterator::kFoundEntity:
+      if (mgcontext->GetNumOperands() > 0) {
+        *s = WriteBatchWithIndexInternal::MergeKeyWithBaseValue(
+            cfh, key, MergeHelper::kWideBaseValue, newest_put,
+            *mgcontext, value, static_cast<PinnableWideColumns*>(nullptr));
+      } else {
+        Slice dv; // deserialized default column value
+        *s = WideColumnSerialization::GetValueOfDefaultColumn(newest_put, dv);
+        if (s->ok())
+          value->assign(dv.data(), dv.size());
+      }
+      result = s->ok() ? WBWIIterator::kFound : WBWIIterator::kError;
+      break;
+  #endif
     case WBWIIterator::kError:
       *s = Status::Corruption("CSPP_WBWI::FetchFromBatch returned error");
       break;
@@ -479,31 +546,61 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       }
       pinnable_val->PinSelf();
       break;
+  #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+    case WBWIIterator::kFoundEntity:
+      if (mgcontext.GetNumOperands() > 0) {
+        st = WriteBatchWithIndexInternal::MergeKeyWithBaseValue(
+            cfh, key, MergeHelper::kWideBaseValue, newest_put,
+            mgcontext, &batch_value, static_cast<PinnableWideColumns*>(nullptr));
+        if (!st.ok())
+          return st;
+      }
+      else {
+        Slice dv; // deserialized default column value
+        st = WideColumnSerialization::GetValueOfDefaultColumn(newest_put, dv);
+        if (!st.ok())
+          return st;
+        batch_value.assign(dv.data(), dv.size());
+      }
+      pinnable_val->PinSelf();
+      break;
+  #endif
     case WBWIIterator::kError:
       st = Status::Corruption("CSPP_WBWI::FetchFromBatch returned error");
       break;
     case WBWIIterator::kDeleted:
       if (mgcontext.GetNumOperands() > 0)
+      {
         st = MergeKey(db, cfh, key, nullptr, &batch_value, mgcontext);
+        if (st.ok())
+          pinnable_val->PinSelf();
+      }
       else
         st = Status::NotFound();
       break;
     case WBWIIterator::kMergeInProgress:
     case WBWIIterator::kNotFound:
+    {
       // Did not find key in batch OR could not resolve Merges.  Try DB.
-      if (!callback) {
-        st = db->Get(read_options, cfh, key, pinnable_val);
-      } else {
         DBImpl::GetImplOptions get_impl_options;
         get_impl_options.column_family = cfh;
         get_impl_options.value = pinnable_val;
         get_impl_options.callback = callback;
+    #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+        PinnableWideColumns existing;
+        if (result == WBWIIteratorImpl::kMergeInProgress) {
+          get_impl_options.value = nullptr;
+          get_impl_options.columns = &existing;
+        }
+    #endif
         auto root_db = static_cast<DBImpl*>(db->GetRootDB());
         st = root_db->GetImpl(read_options, key, get_impl_options);
-      }
       if (result == WBWIIterator::kMergeInProgress) {
         if (st.ok() || st.IsNotFound()) {  // DB Get Succeeded
           // Merge result from DB with merges in Batch
+    #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+          MergeAcrossBatchAndDB(cfh, key, existing, mgcontext, pinnable_val, &st);
+    #else
           std::string merge_result;
           if (st.ok()) {
             st = MergeKey(db, cfh, key, pinnable_val, &merge_result, mgcontext);
@@ -515,8 +612,10 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
             pinnable_val->GetSelf()->assign(std::move(merge_result));
             pinnable_val->PinSelf();
           }
+    #endif
         }
       }
+    } // case
       break;
     default:
       ROCKSDB_DIE("Unexpected: result = %d", result);
@@ -734,6 +833,11 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       switch (m_rec.type) {
       case kPutRecord:
         return WBWIIteratorImpl::kFound;
+    #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+      case kPutEntityRecord:
+        //return WBWIIteratorImpl::kFoundEntity;
+        return WBWIIteratorImpl::kFound;
+    #endif
       case kDeleteRecord:
         return WBWIIteratorImpl::kDeleted;
       case kSingleDeleteRecord:
@@ -1057,7 +1161,11 @@ const char* CSPP_WBWI::OneRecord::Read(const char* input) {
     case kTypeWideColumnEntity:
       ReadSlice(key, "bad WriteBatch PutEntity");
       ReadSlice(value, "bad WriteBatch PutEntity");
+    #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+      this->type = kPutEntityRecord;
+    #else
       this->type = kUnknownRecord;
+    #endif
       break;
     default:
       ROCKSDB_DIE("bad WriteBatch tag = %s", enum_cstr(ValueType(tag)));
