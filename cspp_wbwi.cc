@@ -637,6 +637,8 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
 };
 struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   Patricia::Iterator* m_iter;
+  const Slice* m_lower_bound = nullptr;
+  const Slice* m_upper_bound = nullptr;
   CSPP_WBWI*  m_tab;
   uint32_t    m_cf_id = 0;
   int         m_idx = -1;
@@ -699,11 +701,20 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     assert(Slice(k.p + 4, k.n - 4) == Entry().key);
     return Slice(k.p + 4, k.n - 4);
   }
+  Slice user_key_no_assert() const {
+    fstring k = m_iter->word();
+    TERARK_ASSERT_GE(k.n, 4);
+    return Slice(k.p + 4, k.n - 4);
+  }
   void Next() final {
     TERARK_ASSERT_GE(m_idx, 0);
     CheckUpdates<false>();
     if (++m_idx == m_num) {
       if (UNLIKELY(!m_iter->incr() || iter_cf_id() != m_cf_id)) {
+        m_idx = -1;
+        return; // fail
+      }
+      if (m_upper_bound && user_key_no_assert() >= *m_upper_bound) {
         m_idx = -1;
         return; // fail
       }
@@ -720,6 +731,8 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     if (m_idx-- == 0) {
       if (UNLIKELY(!m_iter->decr() || iter_cf_id() != m_cf_id))
         return; // fail
+      if (m_lower_bound && user_key_no_assert() < *m_lower_bound)
+        return; // fail
       auto vn = m_tab->m_trie.value_of<VecNode>(*m_iter);
       m_idx = vn.num - 1;
       m_num = vn.num;
@@ -734,12 +747,24 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     if (UNLIKELY(!m_iter)) {
       m_iter = m_tab->m_trie.new_iter();
     }
-    DefineLookupKey(lookup_key, m_cf_id, userkey);
+    Slice seek_key = userkey;
+    if (m_lower_bound && seek_key < *m_lower_bound) {
+      seek_key = *m_lower_bound;
+    }
+    if (m_upper_bound && seek_key >= *m_upper_bound) {
+      return; // fail
+    }
+    DefineLookupKey(lookup_key, m_cf_id, seek_key);
     if (UNLIKELY(!m_iter->seek_lower_bound(lookup_key))) {
       return; // fail
     }
-    if (iter_cf_id() == m_cf_id)
-      SetFirstEntry();
+    if (UNLIKELY(iter_cf_id() != m_cf_id)) {
+      return; // fail
+    }
+    if (m_upper_bound && user_key_no_assert() >= *m_upper_bound) {
+      return; // fail
+    }
+    SetFirstEntry();
   }
   void SeekForPrev(const Slice& userkey) final {
     m_idx = -1;
@@ -748,8 +773,27 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     if (UNLIKELY(!m_iter)) {
       m_iter = m_tab->m_trie.new_iter();
     }
-    DefineLookupKey(lookup_key, m_cf_id, userkey);
+    Slice seek_key = userkey;
+    if (m_upper_bound && seek_key > *m_upper_bound) {
+      seek_key = *m_upper_bound;
+    }
+    if (m_lower_bound && seek_key < *m_lower_bound) {
+      return; // fail
+    }
+    DefineLookupKey(lookup_key, m_cf_id, seek_key);
     if (UNLIKELY(!m_iter->seek_rev_lower_bound(lookup_key))) {
+      return; // fail
+    }
+    if (UNLIKELY(iter_cf_id() != m_cf_id)) {
+      return; // fail
+    }
+    if (UNLIKELY(m_upper_bound && user_key_no_assert() == *m_upper_bound)) {
+      m_idx = 0;
+      if (!PrevKey())
+        return;
+    }
+    if (UNLIKELY(m_lower_bound && user_key_no_assert() < *m_lower_bound)) {
+      m_idx = -1;
       return; // fail
     }
     if (m_iter->word() == lookup_key)
@@ -758,6 +802,10 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       SetLastEntry();
   }
   void SeekToFirst() final {
+    if (m_lower_bound) {
+      Seek(*m_lower_bound);
+      return;
+    }
     m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
@@ -775,6 +823,10 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     SetFirstEntry();
   }
   void SeekToLast() final {
+    if (m_upper_bound) {
+      SeekForPrev(*m_upper_bound);
+      return;
+    }
     m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
@@ -805,6 +857,10 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       m_idx = -1;
       return false; // fail
     }
+    if (m_lower_bound && user_key_no_assert() < *m_lower_bound) {
+      m_idx = -1;
+      return false; // fail
+    }
     SetFirstEntry();
     return true;
   }
@@ -813,6 +869,10 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     CheckUpdates<false>();
     TERARK_ASSERT_GE(m_idx, 0);
     if (UNLIKELY(!m_iter->incr() || iter_cf_id() != m_cf_id)) {
+      m_idx = -1;
+      return false; // fail
+    }
+    if (m_upper_bound && user_key_no_assert() >= *m_upper_bound) {
       m_idx = -1;
       return false; // fail
     }
@@ -885,6 +945,10 @@ Iterator* CSPP_WBWI::NewIteratorWithBase(
     ColumnFamilyHandle* cfh, Iterator* base,
     const ReadOptions* ro) {
   auto wbwiii = new Iter(this, GetColumnFamilyID(cfh));
+  if (ro) {
+    wbwiii->m_lower_bound = ro->iterate_lower_bound;
+    wbwiii->m_upper_bound = ro->iterate_upper_bound;
+  }
   auto ucmp = GetColumnFamilyUserComparator(cfh);
   return new BaseDeltaIterator(cfh, base, wbwiii, ucmp, ro);
 }
