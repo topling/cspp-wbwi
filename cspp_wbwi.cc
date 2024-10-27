@@ -13,6 +13,9 @@
 #include <rocksdb/utilities/write_batch_with_index.h>
 #include <utilities/write_batch_with_index/write_batch_with_index_internal.h>
 #include <topling/side_plugin_factory.h>
+#if defined(_MSC_VER)
+  #pragma warning(disable: 4245) // convert int to size_t in fsa of cspp
+#endif
 #include <terark/fsa/cspptrie.inl>
 #include <terark/io/DataIO_Basic.hpp>
 #include <terark/num_to_str.hpp>
@@ -78,7 +81,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       m_trie.mutable_value_of<VecNode>(m_wtoken) = vn;
     }
     else { // dup key, append on vector or overwirte last vector elem
-      vn = m_wtoken.value_of<VecNode>();
+      vn = m_trie.value_of<VecNode>(m_wtoken);
       auto vec = (Elem*)m_trie.mem_get(vn.pos);
       if (LIKELY(m_last_sub_batch_offset <= vec[vn.num-1])) {
         m_last_sub_batch_offset = m_last_entry_offset;
@@ -986,7 +989,7 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
   bool allow_fallback = false; // mainly for rocksdb unit test
   size_t trie_reserve_cap = 0;
   size_t data_reserve_cap = 0;
-  size_t data_max_cap = 2 << 30; // 2G, max allowed is 4G
+  size_t data_max_cap = 2u << 30; // 2G, max allowed is 4G
   size_t cumu_num = 0, cumu_iter_num = 0;
   size_t live_num = 0, live_iter_num = 0;
   uint64_t cumu_used_mem = 0;
