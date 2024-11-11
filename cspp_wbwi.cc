@@ -48,20 +48,32 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   size_t   m_last_entry_offset = 0;
   size_t   m_last_sub_batch_offset = 0;
   size_t   m_sub_batch_cnt = 1;
-  CSPP_WBWI(CSPP_WBWIFactory*, bool overwrite_key);
+  const Comparator* m_default_cmp;
+  valvec<const Comparator*> m_cf_cmp{8, valvec_reserve()};
+  CSPP_WBWI(CSPP_WBWIFactory*, bool overwrite_key, const Comparator*);
   ~CSPP_WBWI() noexcept override;
   void SetLastEntryOffset() {
     m_last_entry_offset = m_batch.GetDataSize();
   }
   const Comparator* GetUserComparator(uint32_t cf_id) const final {
-      return BytewiseComparator();
+    if (cf_id < m_cf_cmp.size() && m_cf_cmp[cf_id]) {
+      return m_cf_cmp[cf_id];
+    }
+    return m_default_cmp;
   }
   void AddOrUpdateIndexCFH(ColumnFamilyHandle* cfh, WriteType type) {
     if (cfh) {
       ROCKSDB_ASSERT_F(!cfh->GetComparator() ||
-               IsForwardBytewiseComparator(cfh->GetComparator()),
+                      IsBytewiseComparator(cfh->GetComparator()),
           "Name() = %s", cfh->GetComparator()->Name());
-      AddOrUpdateIndex(cfh->GetID(), type);
+      const uint32_t cf_id = cfh->GetID();
+      const Comparator*& cmp = m_cf_cmp.ensure_get(cf_id);
+      if (nullptr == cmp) {
+        cmp = cfh->GetComparator();
+      } else {
+        ROCKSDB_ASSERT_EQ(cmp, cfh->GetComparator());
+      }
+      AddOrUpdateIndex(cf_id, type);
     } else {
       AddOrUpdateIndex(0, type);
     }
@@ -644,12 +656,13 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   const Slice* m_upper_bound = nullptr;
   CSPP_WBWI*  m_tab;
   uint32_t    m_cf_id = 0;
+  bool        m_is_forward_cmp = false;
   int         m_idx = -1;
   int         m_num = 0;
   size_t      m_last_entry_offset;
   const Elem* m_vec = nullptr;
   OneRecord   m_rec;
-  explicit Iter(CSPP_WBWI*, uint32_t cf_id);
+  explicit Iter(CSPP_WBWI*, uint32_t cf_id, const Comparator* cmp);
   ~Iter() noexcept override;
   uint32_t iter_cf_id() const {
     auto bigendian_cf_id = *(const uint32_t*)m_iter->word().data();
@@ -709,15 +722,45 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     TERARK_ASSERT_GE(k.n, 4);
     return Slice(k.p + 4, k.n - 4);
   }
+  terark_forceinline bool CmpOrderNext() {
+    if (m_is_forward_cmp)
+      return m_iter->incr();
+    else
+      return m_iter->decr();
+  }
+  terark_forceinline bool CmpOrderPrev() {
+    if (m_is_forward_cmp)
+      return m_iter->decr();
+    else
+      return m_iter->incr();
+  }
+  terark_forceinline bool LT(Slice x, Slice y) const {
+    if (m_is_forward_cmp)
+      return x < y;
+    else
+      return y < x;
+  }
+  terark_forceinline bool GT(Slice x, Slice y) const {
+    if (m_is_forward_cmp)
+      return x > y;
+    else
+      return y > x;
+  }
+  terark_forceinline bool GE(Slice x, Slice y) const {
+    if (m_is_forward_cmp)
+      return x >= y;
+    else
+      return y >= x;
+  }
   void Next() final {
     TERARK_ASSERT_GE(m_idx, 0);
     CheckUpdates<false>();
     if (++m_idx == m_num) {
-      if (UNLIKELY(!m_iter->incr() || iter_cf_id() != m_cf_id)) {
+      if (UNLIKELY(!CmpOrderNext() || iter_cf_id() != m_cf_id)) {
         m_idx = -1;
         return; // fail
       }
-      if (m_upper_bound && user_key_no_assert() >= *m_upper_bound) {
+      if (m_upper_bound && GE(user_key_no_assert(), *m_upper_bound)) {
         m_idx = -1;
         return; // fail
       }
@@ -732,9 +775,9 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     TERARK_ASSERT_GE(m_idx, 0);
     CheckUpdates<false>();
     if (m_idx-- == 0) {
-      if (UNLIKELY(!m_iter->decr() || iter_cf_id() != m_cf_id))
+      if (UNLIKELY(!CmpOrderPrev() || iter_cf_id() != m_cf_id))
         return; // fail
-      if (m_lower_bound && user_key_no_assert() < *m_lower_bound)
+      if (m_lower_bound && LT(user_key_no_assert(), *m_lower_bound))
         return; // fail
       auto vn = m_tab->m_trie.value_of<VecNode>(*m_iter);
       m_idx = vn.num - 1;
@@ -744,6 +787,12 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     m_tab->ReadRecord(m_vec[m_idx], &m_rec);
   }
   void Seek(const Slice& userkey) final {
+    if (m_is_forward_cmp)
+      SeekForward(userkey);
+    else
+      SeekReverse(userkey);
+  }
+  void SeekForward(const Slice& userkey) {
     m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
@@ -751,10 +800,10 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       m_iter = m_tab->m_trie.new_iter();
     }
     Slice seek_key = userkey;
-    if (m_lower_bound && seek_key < *m_lower_bound) {
+    if (m_lower_bound && LT(seek_key, *m_lower_bound)) {
       seek_key = *m_lower_bound;
     }
-    if (m_upper_bound && seek_key >= *m_upper_bound) {
+    if (m_upper_bound && GE(seek_key, *m_upper_bound)) {
       return; // fail
     }
     DefineLookupKey(lookup_key, m_cf_id, seek_key);
@@ -764,12 +813,18 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     if (UNLIKELY(iter_cf_id() != m_cf_id)) {
       return; // fail
     }
-    if (m_upper_bound && user_key_no_assert() >= *m_upper_bound) {
+    if (m_upper_bound && GE(user_key_no_assert(), *m_upper_bound)) {
       return; // fail
     }
     SetFirstEntry();
   }
   void SeekForPrev(const Slice& userkey) final {
+    if (m_is_forward_cmp)
+      SeekReverse(userkey);
+    else
+      SeekForward(userkey);
+  }
+  void SeekReverse(const Slice& userkey) {
     m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
@@ -777,10 +832,10 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       m_iter = m_tab->m_trie.new_iter();
     }
     Slice seek_key = userkey;
-    if (m_upper_bound && seek_key > *m_upper_bound) {
+    if (m_upper_bound && GT(seek_key, *m_upper_bound)) {
       seek_key = *m_upper_bound;
     }
-    if (m_lower_bound && seek_key < *m_lower_bound) {
+    if (m_lower_bound && LT(seek_key, *m_lower_bound)) {
       return; // fail
     }
     DefineLookupKey(lookup_key, m_cf_id, seek_key);
@@ -795,7 +850,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       if (!PrevKey())
         return;
     }
-    if (UNLIKELY(m_lower_bound && user_key_no_assert() < *m_lower_bound)) {
+    if (UNLIKELY(m_lower_bound && LT(user_key_no_assert(), *m_lower_bound))) {
       m_idx = -1;
       return; // fail
     }
@@ -809,58 +864,68 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       Seek(*m_lower_bound);
       return;
     }
+    if (m_is_forward_cmp ? SeekToFirstForward() : SeekToLastForward()) {
+      SetFirstEntry();
+    }
+  }
+  bool SeekToFirstForward() {
     m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
-    if (0 == m_last_entry_offset) return;
+    if (0 == m_last_entry_offset) return false;
     if (UNLIKELY(!m_iter)) {
       m_iter = m_tab->m_trie.new_iter();
     }
     uint32_t big_cf_id = BIG_ENDIAN_OF(m_cf_id);
     fstring lookup_key((char*)&big_cf_id, 4);
     if (UNLIKELY(!m_iter->seek_lower_bound(lookup_key))) {
-      return; // fail
+      return false;
     }
     if (UNLIKELY(*(uint32_t*)m_iter->word().data() != big_cf_id)) {
-      return; // fail
+      return false;
     }
-    SetFirstEntry();
+    return true;
   }
   void SeekToLast() final {
     if (m_upper_bound) {
       SeekForPrev(*m_upper_bound);
       return;
     }
+    if (m_is_forward_cmp ? SeekToLastForward() : SeekToFirstForward()) {
+      SetLastEntry();
+    }
+  }
+  bool SeekToLastForward() {
     m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
-    if (0 == m_last_entry_offset) return;
+    if (0 == m_last_entry_offset) return false;
     if (UNLIKELY(!m_iter)) {
       m_iter = m_tab->m_trie.new_iter();
     }
     uint32_t big_next_cf_id = BIG_ENDIAN_OF(m_cf_id+1);
     fstring lookup_key((char*)&big_next_cf_id, 4);
     if (UNLIKELY(!m_iter->seek_rev_lower_bound(lookup_key))) {
-      return; // fail
+      return false;
     }
     if (UNLIKELY(*(uint32_t*)m_iter->word().data() == big_next_cf_id)) {
       if (!m_iter->decr()) {
-        return; // fail
+        return false;
       }
     }
     if (iter_cf_id() != m_cf_id) {
       ROCKSDB_ASSERT_LT(iter_cf_id(), m_cf_id);
-      return; // fail
+      return false;
     }
-    SetLastEntry();
+    return true;
   }
   // Moves the iterator to first entry of the previous key.
   bool PrevKey() final {
     CheckUpdates<false>();
     TERARK_ASSERT_GE(m_idx, 0);
-    if (UNLIKELY(!m_iter->decr() || iter_cf_id() != m_cf_id)) {
+    if (UNLIKELY(!CmpOrderPrev() || iter_cf_id() != m_cf_id)) {
       m_idx = -1;
       return false; // fail
     }
-    if (m_lower_bound && user_key_no_assert() < *m_lower_bound) {
+    if (m_lower_bound && LT(user_key_no_assert(), *m_lower_bound)) {
       m_idx = -1;
       return false; // fail
     }
@@ -871,11 +936,11 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   bool NextKey() final {
     CheckUpdates<false>();
     TERARK_ASSERT_GE(m_idx, 0);
-    if (UNLIKELY(!m_iter->incr() || iter_cf_id() != m_cf_id)) {
+    if (UNLIKELY(!CmpOrderNext() || iter_cf_id() != m_cf_id)) {
       m_idx = -1;
       return false; // fail
     }
-    if (m_upper_bound && user_key_no_assert() >= *m_upper_bound) {
+    if (m_upper_bound && GE(user_key_no_assert(), *m_upper_bound)) {
       m_idx = -1;
       return false; // fail
     }
@@ -939,15 +1004,30 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   }
 };
 WBWIIterator* CSPP_WBWI::NewIterator(ColumnFamilyHandle* cfh) {
-  return new Iter(this, GetColumnFamilyID(cfh));
+  auto cmp = cfh->GetComparator();
+  if (!cmp) { // Mock cfh comparator maybe null
+    cmp = m_default_cmp;
+  }
+  return new Iter(this, GetColumnFamilyID(cfh), cmp);
 }
 WBWIIterator* CSPP_WBWI::NewIterator() {
-  return new Iter(this, 0);
+  return new Iter(this, 0, m_default_cmp);
 }
 Iterator* CSPP_WBWI::NewIteratorWithBase(
     ColumnFamilyHandle* cfh, Iterator* base,
     const ReadOptions* ro) {
-  auto wbwiii = new Iter(this, GetColumnFamilyID(cfh));
+  auto cmp = m_default_cmp;
+  if (cfh) {
+    uint32_t cf_id = cfh->GetID();
+    if (cf_id < m_cf_cmp.size()) {
+      ROCKSDB_VERIFY_EQ(cfh->GetComparator(), m_cf_cmp[cf_id]);
+    }
+    if (cfh->GetComparator()) { // Mock cfh comparator maybe null
+      cmp = cfh->GetComparator();
+      ROCKSDB_VERIFY(cmp->IsBytewise());
+    }
+  }
+  auto wbwiii = new Iter(this, GetColumnFamilyID(cfh), cmp);
   if (ro) {
     wbwiii->m_lower_bound = ro->iterate_lower_bound;
     wbwiii->m_upper_bound = ro->iterate_upper_bound;
@@ -957,8 +1037,8 @@ Iterator* CSPP_WBWI::NewIteratorWithBase(
 }
 Iterator* CSPP_WBWI::NewIteratorWithBase(Iterator* base) {
   // default column family's comparator
-  auto wbwiii = new Iter(this, 0);
-  return new BaseDeltaIterator(nullptr, base, wbwiii, BytewiseComparator());
+  auto wbwiii = new Iter(this, 0, m_default_cmp);
+  return new BaseDeltaIterator(nullptr, base, wbwiii, m_default_cmp);
 }
 void JS_CSPP_WBWI_AddVersion(json& djs, bool html) {
   auto& ver = djs["cspp-wbwi"];
@@ -1000,13 +1080,13 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
   , size_t prot
  #endif
   ) final {
-    if (cmp && !IsForwardBytewiseComparator(cmp)) {
+    if (cmp && (!cmp->IsBytewise() || cmp->timestamp_size() > 0)) {
       if (allow_fallback)
         return new WriteBatchWithIndex(cmp, 0, overwrite_key, 0);
       else
         ROCKSDB_DIE("allow_fallback is false and cmp is '%s'", cmp->Name());
     }
-    return new CSPP_WBWI(this, overwrite_key);
+    return new CSPP_WBWI(this, overwrite_key, cmp);
   }
   const char *Name() const noexcept final { return "CSPP_WBWI"; }
 //-----------------------------------------------------------------
@@ -1035,10 +1115,11 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
     return JsonToString(djs, d);
   }
 };
-CSPP_WBWI::Iter::Iter(CSPP_WBWI* tab, uint32_t cf_id) {
+CSPP_WBWI::Iter::Iter(CSPP_WBWI* tab, uint32_t cf_id, const Comparator* cmp) {
   m_tab = tab;
   m_iter = nullptr;
   m_cf_id = cf_id;
+  m_is_forward_cmp = cmp->IsForwardBytewise();
   m_last_entry_offset = tab->m_last_entry_offset;
   auto factory = tab->m_fac;
   as_atomic(factory->cumu_iter_num).fetch_add(1, std::memory_order_relaxed);
@@ -1066,10 +1147,11 @@ CSPP_WBWI::Iter::~Iter() noexcept {
 }
 static constexpr auto ConLevel = Patricia::SingleThreadStrict;
 //static constexpr auto ConLevel = Patricia::SingleThreadShared;
-CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key)
+CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key, const Comparator* dc)
     : WriteBatchWithIndex(Slice()) // default cons placeholder with Slice
     , m_trie(sizeof(VecNode), f->trie_reserve_cap, ConLevel)
     , m_batch(f->data_reserve_cap) {
+  m_default_cmp = dc; //ROCKSDB_VERIFY(nullptr != m_default_cmp);//can be null
   m_overwrite_key = overwrite_key;
   m_fac = f;
   m_max_cap = f->data_max_cap;
