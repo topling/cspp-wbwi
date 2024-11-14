@@ -1020,7 +1020,14 @@ Iterator* CSPP_WBWI::NewIteratorWithBase(
   if (cfh) {
     uint32_t cf_id = cfh->GetID();
     if (cf_id < m_cf_cmp.size()) {
-      ROCKSDB_VERIFY_EQ(cfh->GetComparator(), m_cf_cmp[cf_id]);
+      if (nullptr == m_cf_cmp[cf_id]) {
+        // may be create a iterator of the cf which was not not written KV
+        // into(empty cf in this wbwi), thus m_cf_cmp[cf_id] is null.
+        // Note: cfh.cmp can also be null(mock cfh).
+        // m_cf_cmp[cf_id] = cfh->GetComparator(); // not needed
+      } else {
+        ROCKSDB_VERIFY_EQ(cfh->GetComparator(), m_cf_cmp[cf_id]);
+      }
     }
     if (cfh->GetComparator()) { // Mock cfh comparator maybe null
       cmp = cfh->GetComparator();
