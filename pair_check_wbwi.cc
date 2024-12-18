@@ -33,20 +33,34 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
     return a->GetWriteBatch();
   }
   void Clear() final {
-    size_t a_data_size = a->GetDataSize();
-    size_t b_data_size = b->GetDataSize();
-    ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
-
     a->Clear();
     b->Clear();
-
-    a_data_size = a->GetDataSize();
-    b_data_size = b->GetDataSize();
-    ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
+  }
+  // OOB: Out-Of-Bound
+  // rocksdb use WriteBatchInternal to write OOB data by GetWriteBatch(),
+  // we can not catch that OOB data, so use SyncBatchAB() to sync it.
+  void SyncBatchAB() {
+    WriteBatch* wa = a->GetWriteBatch();
+    WriteBatch* wb = b->GetWriteBatch();
+    size_t a_data_size = wa->GetDataSize();
+    size_t b_data_size = wb->GetDataSize();
+    std::string& a_mut = const_cast<std::string&>(wa->Data());
+    std::string& b_mut = const_cast<std::string&>(wb->Data());
+    if (b_data_size < a_data_size) {
+      size_t len = a_data_size - b_data_size;
+      b_mut.append(a_mut, b_data_size, len);
+    }
+    if (b_data_size >= 13) { // 13 is header(12) + noop(1)
+      // for prepared txn, rocksdb will update the header
+      if (memcmp(a_mut.data(), b_mut.data(), 13) != 0) {
+        memcpy(b_mut.data(), a_mut.data(), 13);
+      }
+    }
   }
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   using WriteBatchWithIndex::Put;
   Status Put(ColumnFamilyHandle* cfh, const Slice& key, const Slice& value) final {
+    SyncBatchAB();
     Status sa = a->Put(cfh, key, value);
     Status sb = b->Put(cfh, key, value);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -56,6 +70,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
     return sa;
   }
   Status Put(const Slice& key, const Slice& value) final {
+    SyncBatchAB();
     Status sa = a->Put(key, value);
     Status sb = b->Put(key, value);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -68,6 +83,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
   using WriteBatchWithIndex::PutEntity;
   Status PutEntity(ColumnFamilyHandle* cfh, const Slice& key,
                    const WideColumns& columns) override {
+    SyncBatchAB();
     Status sa = a->PutEntity(cfh, key, columns);
     Status sb = b->PutEntity(cfh, key, columns);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -79,6 +95,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
 #endif
   using WriteBatchWithIndex::Delete;
   Status Delete(ColumnFamilyHandle* cfh, const Slice& key) final {
+    SyncBatchAB();
     Status sa = a->Delete(cfh, key);
     Status sb = b->Delete(cfh, key);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -88,6 +105,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
     return sa;
   }
   Status Delete(const Slice& key) final {
+    SyncBatchAB();
     Status sa = a->Delete(key);
     Status sb = b->Delete(key);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -98,6 +116,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
   }
   using WriteBatchWithIndex::SingleDelete;
   Status SingleDelete(ColumnFamilyHandle* cfh, const Slice& key) final {
+    SyncBatchAB();
     Status sa = a->SingleDelete(cfh, key);
     Status sb = b->SingleDelete(cfh, key);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -107,6 +126,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
     return sa;
   }
   Status SingleDelete(const Slice& key) final {
+    SyncBatchAB();
     Status sa = a->SingleDelete(key);
     Status sb = b->SingleDelete(key);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -117,6 +137,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
   }
   using WriteBatchWithIndex::Merge;
   Status Merge(ColumnFamilyHandle* cfh, const Slice& key, const Slice& value) final {
+    SyncBatchAB();
     Status sa = a->Merge(cfh, key, value);
     Status sb = b->Merge(cfh, key, value);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -126,6 +147,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
     return sa;
   }
   Status Merge(const Slice& key, const Slice& value) final {
+    SyncBatchAB();
     Status sa = a->Merge(key, value);
     Status sb = b->Merge(key, value);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -135,6 +157,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
     return sa;
   }
   Status PutLogData(const Slice& blob) final {
+    SyncBatchAB();
     Status sa = a->PutLogData(blob);
     Status sb = b->PutLogData(blob);
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
@@ -144,61 +167,44 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
     return sa;
   }
   void SetSavePoint() final {
-    size_t a_data_size = a->GetDataSize();
-    size_t b_data_size = b->GetDataSize();
-    ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
+    SyncBatchAB();
     a->SetSavePoint();
     b->SetSavePoint();
-    a_data_size = a->GetDataSize();
-    b_data_size = b->GetDataSize();
+    size_t a_data_size = a->GetDataSize();
+    size_t b_data_size = b->GetDataSize();
     ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
   }
   Status RollbackToSavePoint() final {
-    size_t a_data_size = a->GetDataSize();
-    size_t b_data_size = b->GetDataSize();
-    ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
-
+    SyncBatchAB();
     Status sa = a->RollbackToSavePoint();
     Status sb = b->RollbackToSavePoint();
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
-
-    a_data_size = a->GetDataSize();
-    b_data_size = b->GetDataSize();
+    size_t a_data_size = a->GetDataSize();
+    size_t b_data_size = b->GetDataSize();
     ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
     return sa;
   }
   Status PopSavePoint() final {
-    size_t a_data_size = a->GetDataSize();
-    size_t b_data_size = b->GetDataSize();
-    ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
-
+    SyncBatchAB();
     Status sa = a->PopSavePoint();
     Status sb = b->PopSavePoint();
     ROCKSDB_VERIFY_EQ(sa.code(), sb.code());
-
-    a_data_size = a->GetDataSize();
-    b_data_size = b->GetDataSize();
+    size_t a_data_size = a->GetDataSize();
+    size_t b_data_size = b->GetDataSize();
     ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
-
     return sa;
   }
   void SetMaxBytes(size_t max_bytes) final {
-    size_t a_data_size = a->GetDataSize();
-    size_t b_data_size = b->GetDataSize();
-    ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
+    SyncBatchAB();
     a->SetMaxBytes(max_bytes);
     b->SetMaxBytes(max_bytes);
-    a_data_size = a->GetDataSize();
-    b_data_size = b->GetDataSize();
-    ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
   }
   size_t GetDataSize() const final {
-    size_t a_data_size = a->GetDataSize();
-    size_t b_data_size = b->GetDataSize();
-    ROCKSDB_VERIFY_EQ(a_data_size, b_data_size);
-    return a_data_size;
+    const_cast<PairCheckWBWI*>(this)->SyncBatchAB();
+    return a->GetDataSize();
   }
   size_t SubBatchCnt() final {
+    const_cast<PairCheckWBWI*>(this)->SyncBatchAB();
     size_t sa = a->SubBatchCnt();
     size_t sb = b->SubBatchCnt();
     ROCKSDB_VERIFY_EQ(sa, sb);
@@ -207,6 +213,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
 
   Status GetFromBatch(ColumnFamilyHandle* cfh, const DBOptions& options,
                       const Slice& key, std::string* value) override {
+    const_cast<PairCheckWBWI*>(this)->SyncBatchAB();
     std::string va, vb;
     Status sa = a->GetFromBatch(cfh, options, key, &va);
     Status sb = b->GetFromBatch(cfh, options, key, &vb);
@@ -221,6 +228,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
   GetFromBatchRaw(DB* db, ColumnFamilyHandle* cfh, const Slice& key,
                   MergeContext* mgcontext, std::string* value, Status* s)
   override {
+    const_cast<PairCheckWBWI*>(this)->SyncBatchAB();
     MergeContext ma, mb;
     std::string va, vb;
     Status sa, sb;
@@ -243,6 +251,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
                            ColumnFamilyHandle* cfh, const Slice& key,
                            PinnableSlice* pinnable_val, ReadCallback* callback)
   override {
+    const_cast<PairCheckWBWI*>(this)->SyncBatchAB();
     // callback may be stateful and can not be called multi times.
     // just forward to a!
     return a->GetFromBatchAndDB(db, ro, cfh, key, pinnable_val, callback);
@@ -319,8 +328,14 @@ struct PairCheckWBWI::Iter : public WBWIIterator, boost::noncopyable {
   void Seek(const Slice& userkey) final {
     ia->Seek(userkey);
     ib->Seek(userkey);
-    ROCKSDB_VERIFY_EQ(ia->Valid(), ib->Valid());
-    if (ia->Valid()) {
+    bool a_valid = ia->Valid();
+    bool b_valid = ib->Valid();
+    if (a_valid != b_valid) {
+      // for debug, call Seek multi times is ok
+      ia->Seek(userkey);
+      ib->Seek(userkey);
+    }
+    if (a_valid) {
       Slice ua = ia->user_key(), va = ia->value();
       Slice ub = ib->user_key(), vb = ib->value();
       ROCKSDB_VERIFY(ua == ub);
@@ -330,8 +345,14 @@ struct PairCheckWBWI::Iter : public WBWIIterator, boost::noncopyable {
   void SeekForPrev(const Slice& userkey) final {
     ia->SeekForPrev(userkey);
     ib->SeekForPrev(userkey);
-    ROCKSDB_VERIFY_EQ(ia->Valid(), ib->Valid());
-    if (ia->Valid()) {
+    bool a_valid = ia->Valid();
+    bool b_valid = ib->Valid();
+    if (a_valid != b_valid) {
+      // for debug, call SeekForPrev multi times is ok
+      ia->SeekForPrev(userkey);
+      ib->SeekForPrev(userkey);
+    }
+    if (a_valid) {
       Slice ua = ia->user_key(), va = ia->value();
       Slice ub = ib->user_key(), vb = ib->value();
       ROCKSDB_VERIFY(ua == ub);
@@ -429,11 +450,13 @@ struct PairCheckWBWI::Iter : public WBWIIterator, boost::noncopyable {
 };
 
 WBWIIterator* PairCheckWBWI::NewIterator(ColumnFamilyHandle* cfh) {
+  SyncBatchAB();
   auto ia = a->NewIterator(cfh);
   auto ib = b->NewIterator(cfh);
   return new Iter{ia, ib};
 }
 WBWIIterator* PairCheckWBWI::NewIterator() {
+  SyncBatchAB();
   auto ia = a->NewIterator();
   auto ib = b->NewIterator();
   return new Iter{ia, ib};
@@ -441,6 +464,7 @@ WBWIIterator* PairCheckWBWI::NewIterator() {
 Iterator* PairCheckWBWI::NewIteratorWithBase(
     ColumnFamilyHandle* cfh, Iterator* base,
     const ReadOptions* ro) {
+  SyncBatchAB();
   auto ia = dynamic_cast<BaseDeltaIterator*>(a->NewIteratorWithBase(cfh, base, ro));
   auto ib = dynamic_cast<BaseDeltaIterator*>(b->NewIteratorWithBase(cfh, base, ro));
   auto wbwiii = new Iter{ia->GetDeltaIter().release(), ib->GetDeltaIter().release()};
@@ -452,6 +476,7 @@ Iterator* PairCheckWBWI::NewIteratorWithBase(
   return new BaseDeltaIterator(cfh, base, wbwiii, cmp, ro);
 }
 Iterator* PairCheckWBWI::NewIteratorWithBase(Iterator* base) {
+  SyncBatchAB();
   // default column family's comparator
   auto ia = dynamic_cast<BaseDeltaIterator*>(a->NewIteratorWithBase(base));
   auto ib = dynamic_cast<BaseDeltaIterator*>(b->NewIteratorWithBase(base));
