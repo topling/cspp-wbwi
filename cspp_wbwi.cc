@@ -1039,8 +1039,7 @@ Iterator* CSPP_WBWI::NewIteratorWithBase(
     wbwiii->m_lower_bound = ro->iterate_lower_bound;
     wbwiii->m_upper_bound = ro->iterate_upper_bound;
   }
-  auto ucmp = GetColumnFamilyUserComparator(cfh);
-  return new BaseDeltaIterator(cfh, base, wbwiii, ucmp, ro);
+  return new BaseDeltaIterator(cfh, base, wbwiii, cmp, ro);
 }
 Iterator* CSPP_WBWI::NewIteratorWithBase(Iterator* base) {
   // default column family's comparator
