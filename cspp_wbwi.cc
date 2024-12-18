@@ -50,7 +50,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   size_t   m_sub_batch_cnt = 1;
   const Comparator* m_default_cmp;
   valvec<const Comparator*> m_cf_cmp{8, valvec_reserve()};
-  CSPP_WBWI(CSPP_WBWIFactory*, bool overwrite_key, const Comparator*);
+  CSPP_WBWI(CSPP_WBWIFactory*, bool overwrite_key, const Comparator*, size_t);
   ~CSPP_WBWI() noexcept override;
   void SetLastEntryOffset() {
     m_last_entry_offset = m_batch.GetDataSize();
@@ -1092,7 +1092,7 @@ struct CSPP_WBWIFactory final : public WBWIFactory {
       else
         ROCKSDB_DIE("allow_fallback is false and cmp is '%s'", cmp->Name());
     }
-    return new CSPP_WBWI(this, overwrite_key, cmp);
+    return new CSPP_WBWI(this, overwrite_key, cmp, prot);
   }
   const char *Name() const noexcept final { return "CSPP_WBWI"; }
 //-----------------------------------------------------------------
@@ -1153,10 +1153,10 @@ CSPP_WBWI::Iter::~Iter() noexcept {
 }
 static constexpr auto ConLevel = Patricia::SingleThreadStrict;
 //static constexpr auto ConLevel = Patricia::SingleThreadShared;
-CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key, const Comparator* dc)
+CSPP_WBWI::CSPP_WBWI(CSPP_WBWIFactory* f, bool overwrite_key, const Comparator* dc, size_t prot)
     : WriteBatchWithIndex(Slice()) // default cons placeholder with Slice
     , m_trie(sizeof(VecNode), f->trie_reserve_cap, ConLevel)
-    , m_batch(f->data_reserve_cap) {
+    , m_batch(f->data_reserve_cap, f->data_max_cap, prot) {
   m_default_cmp = dc; //ROCKSDB_VERIFY(nullptr != m_default_cmp);//can be null
   m_overwrite_key = overwrite_key;
   m_fac = f;
