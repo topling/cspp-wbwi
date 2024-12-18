@@ -786,13 +786,22 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     }
     m_tab->ReadRecord(m_vec[m_idx], &m_rec);
   }
+  struct ForwardLowerBound {
+    bool operator()(Patricia::Iterator* iter, fstring key) const
+    { return iter->seek_lower_bound(key); }
+  };
+  struct ReverseLowerBound {
+    bool operator()(Patricia::Iterator* iter, fstring key) const
+    { return iter->seek_rev_lower_bound(key); }
+  };
   void Seek(const Slice& userkey) final {
     if (m_is_forward_cmp)
-      SeekForward(userkey);
+      SeekForward(userkey, ForwardLowerBound());
     else
-      SeekReverse(userkey);
+      SeekForward(userkey, ReverseLowerBound());
   }
-  void SeekForward(const Slice& userkey) {
+  template<class LowerBound>
+  void SeekForward(const Slice& userkey, LowerBound lower_bound_fn) {
     m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
@@ -807,7 +816,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       return; // fail
     }
     DefineLookupKey(lookup_key, m_cf_id, seek_key);
-    if (UNLIKELY(!m_iter->seek_lower_bound(lookup_key))) {
+    if (UNLIKELY(!lower_bound_fn(m_iter, lookup_key))) {
       return; // fail
     }
     if (UNLIKELY(iter_cf_id() != m_cf_id)) {
@@ -820,11 +829,12 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   }
   void SeekForPrev(const Slice& userkey) final {
     if (m_is_forward_cmp)
-      SeekReverse(userkey);
+      SeekReverse(userkey, ReverseLowerBound());
     else
-      SeekForward(userkey);
+      SeekReverse(userkey, ForwardLowerBound());
   }
-  void SeekReverse(const Slice& userkey) {
+  template<class LowerBound>
+  void SeekReverse(const Slice& userkey, LowerBound lower_bound_fn) {
     m_idx = -1;
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
@@ -839,7 +849,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       return; // fail
     }
     DefineLookupKey(lookup_key, m_cf_id, seek_key);
-    if (UNLIKELY(!m_iter->seek_rev_lower_bound(lookup_key))) {
+    if (UNLIKELY(!lower_bound_fn(m_iter, lookup_key))) {
       return; // fail
     }
     if (UNLIKELY(iter_cf_id() != m_cf_id)) {
