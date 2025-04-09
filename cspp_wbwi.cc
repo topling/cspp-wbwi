@@ -22,6 +22,27 @@
 const char* git_version_hash_info_cspp_wbwi();
 namespace ROCKSDB_NAMESPACE {
 using namespace terark;
+inline const char* SkipVarint32Ptr(const char* p, const char* limit) {
+  if (LIKELY(p < limit)) {
+    auto result = *(reinterpret_cast<const unsigned char*>(p));
+    if (LIKELY((result & 128) == 0)) {
+      return p + 1;
+    }
+  }
+  uint32_t ignored;
+  return GetVarint32PtrFallback(p, limit, &ignored);
+}
+// Copy and modified from ReadKeyFromWriteBatchEntry
+inline Slice GetKeyFromWriteBatchEntry(Slice input, bool cf_record) {
+  const char* ptr = input.data_ + 1; // + 1 for `remove_prefix(1)`
+  const char* end = input.end();
+  if (cf_record) {
+    ptr = SkipVarint32Ptr(ptr, end);
+  }
+  uint32_t key_len = 0;
+  ptr = GetVarint32Ptr(ptr, end, &key_len);
+  return {ptr, key_len};
+}
 // prepend bytewise(bigendian) cf_id on userkey
 static fstring InitLookupKey(void* alloca_ptr, uint32_t cf_id, Slice userkey) {
   fstring lookup_key((char*)alloca_ptr, 4 + userkey.size_);
@@ -80,10 +101,8 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   }
   void AddOrUpdateIndex(uint32_t cf_id, WriteType type) {
     size_t offset = m_last_entry_offset;
-    Slice raw_entry = Slice(m_batch.Data()).substr(offset), userkey;
-    bool success __attribute__((unused)) =
-        ReadKeyFromWriteBatchEntry(&raw_entry, &userkey, cf_id != 0);
-    assert(success);
+    Slice raw_entry = Slice(m_batch.Data()).substr(offset);
+    Slice userkey = GetKeyFromWriteBatchEntry(raw_entry, cf_id != 0);
     DefineLookupKey(lookup_key, cf_id, userkey);
     VecNode vn = {0,0};
     if (m_trie.insert(lookup_key, &vn, &m_wtoken)) {
