@@ -613,42 +613,49 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         st = Status::NotFound();
       break;
     case WBWIIterator::kMergeInProgress:
+    {
+      // Could not resolve Merges.  Try DB.
+      DBImpl::GetImplOptions get_impl_options;
+      get_impl_options.column_family = cfh;
+      get_impl_options.callback = callback;
+    #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+      PinnableWideColumns existing;
+      get_impl_options.value = nullptr;
+      get_impl_options.columns = &existing;
+    #else
+      get_impl_options.value = pinnable_val;
+    #endif
+      auto root_db = static_cast<DBImpl*>(db->GetRootDB());
+      st = root_db->GetImpl(read_options, key, get_impl_options);
+      if (st.ok() || st.IsNotFound()) {  // DB Get Succeeded
+        // Merge result from DB with merges in Batch
+    #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
+        MergeAcrossBatchAndDB(cfh, key, existing, mgcontext, pinnable_val, &st);
+    #else
+        std::string merge_result;
+        if (st.ok()) {
+          st = MergeKey(db, cfh, key, pinnable_val, &merge_result, mgcontext);
+        } else {  // Key not present in db (s.IsNotFound())
+          st = MergeKey(db, cfh, key, nullptr, &merge_result, mgcontext);
+        }
+        if (st.ok()) {
+          pinnable_val->Reset();
+          pinnable_val->GetSelf()->assign(std::move(merge_result));
+          pinnable_val->PinSelf();
+        }
+    #endif
+      }
+    }
+      break;
     case WBWIIterator::kNotFound:
     {
-      // Did not find key in batch OR could not resolve Merges.  Try DB.
+      // Did not find key in batch.  Try DB.
         DBImpl::GetImplOptions get_impl_options;
         get_impl_options.column_family = cfh;
         get_impl_options.value = pinnable_val;
         get_impl_options.callback = callback;
-    #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
-        PinnableWideColumns existing;
-        if (result == WBWIIteratorImpl::kMergeInProgress) {
-          get_impl_options.value = nullptr;
-          get_impl_options.columns = &existing;
-        }
-    #endif
         auto root_db = static_cast<DBImpl*>(db->GetRootDB());
         st = root_db->GetImpl(read_options, key, get_impl_options);
-      if (result == WBWIIterator::kMergeInProgress) {
-        if (st.ok() || st.IsNotFound()) {  // DB Get Succeeded
-          // Merge result from DB with merges in Batch
-    #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
-          MergeAcrossBatchAndDB(cfh, key, existing, mgcontext, pinnable_val, &st);
-    #else
-          std::string merge_result;
-          if (st.ok()) {
-            st = MergeKey(db, cfh, key, pinnable_val, &merge_result, mgcontext);
-          } else {  // Key not present in db (s.IsNotFound())
-            st = MergeKey(db, cfh, key, nullptr, &merge_result, mgcontext);
-          }
-          if (st.ok()) {
-            pinnable_val->Reset();
-            pinnable_val->GetSelf()->assign(std::move(merge_result));
-            pinnable_val->PinSelf();
-          }
-    #endif
-        }
-      }
     } // case
       break;
     default:
