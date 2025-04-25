@@ -43,15 +43,6 @@ inline Slice GetKeyFromWriteBatchEntry(Slice input, bool cf_record) {
   ptr = GetVarint32Ptr(ptr, end, &key_len);
   return {ptr, key_len};
 }
-// prepend bytewise(bigendian) cf_id on userkey
-static fstring InitLookupKey(void* alloca_ptr, uint32_t cf_id, Slice userkey) {
-  fstring lookup_key((char*)alloca_ptr, 4 + userkey.size_);
-  aligned_save(alloca_ptr, BIG_ENDIAN_OF(cf_id));
-  memcpy((char*)alloca_ptr + 4, userkey.data_, userkey.size_);
-  return lookup_key;
-}
-#define DefineLookupKey(var, cf_id, userkey) \
-  const fstring var = InitLookupKey(alloca(4 + userkey.size_), cf_id, userkey)
 struct CSPP_WBWIFactory;
 struct CSPP_WBWI : public WriteBatchWithIndex {
   using Elem = uint32_t;
@@ -70,15 +61,21 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
   size_t   m_last_sub_batch_offset = 0;
   size_t   m_sub_batch_cnt = 1;
   const Comparator* m_default_cmp;
-  valvec<const Comparator*> m_cf_cmp{8, valvec_reserve()};
+  static constexpr size_t nil_root = SIZE_MAX;
+  struct CFMeta {
+    const Comparator* cmp;
+    size_t root = nil_root;
+  };
+  valvec<CFMeta> m_cf_meta{8, valvec_reserve()};
   CSPP_WBWI(CSPP_WBWIFactory*, bool overwrite_key, const Comparator*, size_t);
   ~CSPP_WBWI() noexcept override;
   void SetLastEntryOffset() {
     m_last_entry_offset = m_batch.GetDataSize();
   }
   const Comparator* GetUserComparator(uint32_t cf_id) const final {
-    if (cf_id < m_cf_cmp.size() && m_cf_cmp[cf_id]) {
-      return m_cf_cmp[cf_id];
+    if (cf_id < m_cf_meta.size() && m_cf_meta[cf_id].cmp) {
+      ROCKSDB_ASSERT_NE(m_cf_meta[cf_id].root, nil_root);
+      return m_cf_meta[cf_id].cmp;
     }
     return m_default_cmp;
   }
@@ -88,24 +85,36 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
                       IsBytewiseComparator(cfh->GetComparator()),
           "Name() = %s", cfh->GetComparator()->Name());
       const uint32_t cf_id = cfh->GetID();
-      const Comparator*& cmp = m_cf_cmp.ensure_get(cf_id);
-      if (nullptr == cmp) {
-        cmp = cfh->GetComparator();
+      auto& cf_meta = m_cf_meta.ensure_get(cf_id);
+      if (UNLIKELY(cf_meta.root == nil_root)) {
+        cf_meta.cmp = cfh->GetComparator();
+        cf_meta.root = cf_id == 0 ? initial_state : m_trie.new_root();
       } else {
-        ROCKSDB_ASSERT_EQ(cmp, cfh->GetComparator());
+        ROCKSDB_ASSERT_EQ(cf_meta.cmp, cfh->GetComparator());
+        ROCKSDB_ASSERT_NE(cf_meta.root, nil_root);
       }
-      AddOrUpdateIndex(cf_id, type);
+      AddOrUpdateIndexImpl(cf_id, type, cf_meta.root);
     } else {
       AddOrUpdateIndex(0, type);
     }
   }
   void AddOrUpdateIndex(uint32_t cf_id, WriteType type) {
+    auto& cf_meta = m_cf_meta.ensure_get(cf_id);
+    if (UNLIKELY(cf_meta.root == nil_root)) {
+      ROCKSDB_ASSERT_EQ(cf_meta.cmp, nullptr);
+      cf_meta.cmp = m_default_cmp;
+      cf_meta.root = cf_id == 0 ? initial_state : m_trie.new_root();
+    } else {
+      //ROCKSDB_ASSERT_EQ(cf_meta.cmp, m_default_cmp); // can be ne
+    }
+    AddOrUpdateIndexImpl(cf_id, type, cf_meta.root);
+  }
+  void AddOrUpdateIndexImpl(uint32_t cf_id, WriteType type, size_t root) {
     size_t offset = m_last_entry_offset;
     Slice raw_entry = Slice(m_batch.Data()).substr(offset);
     Slice userkey = GetKeyFromWriteBatchEntry(raw_entry, cf_id != 0);
-    DefineLookupKey(lookup_key, cf_id, userkey);
     VecNode vn = {0,0};
-    if (m_trie.insert(lookup_key, &vn, &m_wtoken)) {
+    if (m_trie.insert(userkey, &vn, &m_wtoken, root)) {
       vn.num = 1;
       vn.pos = uint32_t(m_trie.mem_alloc(sizeof(Elem)));
       *(Elem*)m_trie.mem_get(vn.pos) = Elem(offset);
@@ -413,9 +422,15 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
       return WBWIIterator::kNotFound;
     }
     uint32_t cf_id = cfh ? cfh->GetID() : 0;
-    DefineLookupKey(lookup_key, cf_id, userkey);
+    if (UNLIKELY(cf_id >= m_cf_meta.size())) {
+      return WBWIIterator::kNotFound;
+    }
+    size_t root = m_cf_meta[cf_id].root;
+    if (UNLIKELY(root == nil_root)) {
+      return WBWIIterator::kNotFound;
+    }
     // wtoken can also used for read
-    if (!m_trie.lookup(lookup_key, &m_wtoken)) {
+    if (!m_trie.lookup(userkey, &m_wtoken, root)) {
       return WBWIIterator::kNotFound;
     }
     auto vn = m_trie.value_of<VecNode>(m_wtoken);
@@ -690,9 +705,19 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   OneRecord   m_rec;
   explicit Iter(CSPP_WBWI*, uint32_t cf_id, const Comparator* cmp);
   ~Iter() noexcept override;
-  uint32_t iter_cf_id() const {
-    auto bigendian_cf_id = *(const uint32_t*)m_iter->word().data();
-    return NATIVE_OF_BIG_ENDIAN(bigendian_cf_id);
+  bool InitIter() {
+    if (UNLIKELY(m_cf_id >= m_tab->m_cf_meta.size())) {
+      return false; // fail
+    }
+    auto& cf_meta = m_tab->m_cf_meta[m_cf_id];
+    if (UNLIKELY(cf_meta.root == nil_root)) {
+      return false;
+    }
+    auto cmp = cf_meta.cmp ? cf_meta.cmp : m_tab->m_default_cmp;
+    ROCKSDB_VERIFY_NE(cmp, nullptr);
+    ROCKSDB_VERIFY_EQ(cmp->IsForwardBytewise(), m_is_forward_cmp);
+    m_iter = m_tab->m_trie.new_iter(cf_meta.root);
+    return true;
   }
   void SetFirstEntry() {
     auto vn = m_tab->m_trie.value_of<VecNode>(*m_iter);
@@ -700,8 +725,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     m_num = vn.num;
     m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
     m_tab->ReadRecord(m_vec[0], &m_rec);
-    assert(iter_cf_id() == m_cf_id);
-    assert(m_iter->word().substr(4) == m_rec.key);
+    assert(m_iter->word() == m_rec.key);
   }
   void SetLastEntry() {
     auto vn = m_tab->m_trie.value_of<VecNode>(*m_iter);
@@ -709,8 +733,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     m_num = vn.num;
     m_vec = (Elem*)m_tab->m_trie.mem_get(vn.pos);
     m_tab->ReadRecord(m_vec[m_idx], &m_rec);
-    assert(iter_cf_id() == m_cf_id);
-    assert(m_iter->word().substr(4) == m_rec.key);
+    assert(m_iter->word() == m_rec.key);
   }
   Status status() const final { return Status::OK(); }
   bool Valid() const final { return m_idx >= 0; }
@@ -740,13 +763,12 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   Slice user_key() const final {
     TERARK_ASSERT_BT(m_idx, 0, m_num);
     fstring k = m_iter->word();
-    assert(Slice(k.p + 4, k.n - 4) == Entry().key);
-    return Slice(k.p + 4, k.n - 4);
+    assert(Slice(k.p, k.n) == Entry().key);
+    return Slice(k.p, k.n);
   }
   Slice user_key_no_assert() const {
     fstring k = m_iter->word();
-    TERARK_ASSERT_GE(k.n, 4);
-    return Slice(k.p + 4, k.n - 4);
+    return Slice(k.p, k.n);
   }
   terark_forceinline bool CmpOrderNext() {
     if (m_is_forward_cmp)
@@ -782,7 +804,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     TERARK_ASSERT_GE(m_idx, 0);
     CheckUpdates<false>();
     if (++m_idx == m_num) {
-      if (UNLIKELY(!CmpOrderNext() || iter_cf_id() != m_cf_id)) {
+      if (UNLIKELY(!CmpOrderNext())) {
         m_idx = -1;
         return; // fail
       }
@@ -801,7 +823,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     TERARK_ASSERT_GE(m_idx, 0);
     CheckUpdates<false>();
     if (m_idx-- == 0) {
-      if (UNLIKELY(!CmpOrderPrev() || iter_cf_id() != m_cf_id))
+      if (UNLIKELY(!CmpOrderPrev()))
         return; // fail
       if (m_lower_bound && LT(user_key_no_assert(), *m_lower_bound))
         return; // fail
@@ -832,7 +854,8 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
     if (UNLIKELY(!m_iter)) {
-      m_iter = m_tab->m_trie.new_iter();
+      if (!InitIter())
+        return; // fail
     }
     Slice seek_key = userkey;
     if (m_lower_bound && LT(seek_key, *m_lower_bound)) {
@@ -841,11 +864,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     if (m_upper_bound && GE(seek_key, *m_upper_bound)) {
       return; // fail
     }
-    DefineLookupKey(lookup_key, m_cf_id, seek_key);
-    if (UNLIKELY(!lower_bound_fn(m_iter, lookup_key))) {
-      return; // fail
-    }
-    if (UNLIKELY(iter_cf_id() != m_cf_id)) {
+    if (UNLIKELY(!lower_bound_fn(m_iter, seek_key))) {
       return; // fail
     }
     if (m_upper_bound && GE(user_key_no_assert(), *m_upper_bound)) {
@@ -865,7 +884,8 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return;
     if (UNLIKELY(!m_iter)) {
-      m_iter = m_tab->m_trie.new_iter();
+      if (!InitIter())
+        return; // fail
     }
     Slice seek_key = userkey;
     if (m_upper_bound && GT(seek_key, *m_upper_bound)) {
@@ -874,11 +894,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     if (m_lower_bound && LT(seek_key, *m_lower_bound)) {
       return; // fail
     }
-    DefineLookupKey(lookup_key, m_cf_id, seek_key);
-    if (UNLIKELY(!lower_bound_fn(m_iter, lookup_key))) {
-      return; // fail
-    }
-    if (UNLIKELY(iter_cf_id() != m_cf_id)) {
+    if (UNLIKELY(!lower_bound_fn(m_iter, seek_key))) {
       return; // fail
     }
     if (UNLIKELY(m_upper_bound && user_key_no_assert() == *m_upper_bound)) {
@@ -890,9 +906,9 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
       m_idx = -1;
       return; // fail
     }
-    if (m_iter->word() == lookup_key)
+    if (m_iter->word() == seek_key)
       SetFirstEntry();
-    else if (iter_cf_id() == m_cf_id)
+    else
       SetLastEntry();
   }
   void SeekToFirst() final {
@@ -909,17 +925,10 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return false;
     if (UNLIKELY(!m_iter)) {
-      m_iter = m_tab->m_trie.new_iter();
+      if (!InitIter())
+        return false; // fail
     }
-    uint32_t big_cf_id = BIG_ENDIAN_OF(m_cf_id);
-    fstring lookup_key((char*)&big_cf_id, 4);
-    if (UNLIKELY(!m_iter->seek_lower_bound(lookup_key))) {
-      return false;
-    }
-    if (UNLIKELY(*(uint32_t*)m_iter->word().data() != big_cf_id)) {
-      return false;
-    }
-    return true;
+    return m_iter->seek_begin();
   }
   void SeekToLast() final {
     if (m_upper_bound) {
@@ -935,29 +944,16 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
     m_last_entry_offset = m_tab->m_last_entry_offset;
     if (0 == m_last_entry_offset) return false;
     if (UNLIKELY(!m_iter)) {
-      m_iter = m_tab->m_trie.new_iter();
+      if (!InitIter())
+        return false; // fail
     }
-    uint32_t big_next_cf_id = BIG_ENDIAN_OF(m_cf_id+1);
-    fstring lookup_key((char*)&big_next_cf_id, 4);
-    if (UNLIKELY(!m_iter->seek_rev_lower_bound(lookup_key))) {
-      return false;
-    }
-    if (UNLIKELY(*(uint32_t*)m_iter->word().data() == big_next_cf_id)) {
-      if (!m_iter->decr()) {
-        return false;
-      }
-    }
-    if (iter_cf_id() != m_cf_id) {
-      ROCKSDB_ASSERT_LT(iter_cf_id(), m_cf_id);
-      return false;
-    }
-    return true;
+    return m_iter->seek_end();
   }
   // Moves the iterator to first entry of the previous key.
   bool PrevKey() final {
     CheckUpdates<false>();
     TERARK_ASSERT_GE(m_idx, 0);
-    if (UNLIKELY(!CmpOrderPrev() || iter_cf_id() != m_cf_id)) {
+    if (UNLIKELY(!CmpOrderPrev())) {
       m_idx = -1;
       return false; // fail
     }
@@ -972,7 +968,7 @@ struct CSPP_WBWI::Iter : WBWIIterator, IterLinkNode, boost::noncopyable {
   bool NextKey() final {
     CheckUpdates<false>();
     TERARK_ASSERT_GE(m_idx, 0);
-    if (UNLIKELY(!CmpOrderNext() || iter_cf_id() != m_cf_id)) {
+    if (UNLIKELY(!CmpOrderNext())) {
       m_idx = -1;
       return false; // fail
     }
@@ -1055,14 +1051,14 @@ Iterator* CSPP_WBWI::NewIteratorWithBase(
   auto cmp = m_default_cmp;
   if (cfh) {
     uint32_t cf_id = cfh->GetID();
-    if (cf_id < m_cf_cmp.size()) {
-      if (nullptr == m_cf_cmp[cf_id]) {
+    if (cf_id < m_cf_meta.size()) {
+      if (nullptr == m_cf_meta[cf_id].cmp) {
         // may be create a iterator of the cf which was not not written KV
-        // into(empty cf in this wbwi), thus m_cf_cmp[cf_id] is null.
+        // into(empty cf in this wbwi), thus m_cf_meta[cf_id] is null.
         // Note: cfh.cmp can also be null(mock cfh).
-        // m_cf_cmp[cf_id] = cfh->GetComparator(); // not needed
+        // m_cf_meta[cf_id] = cfh->GetComparator(); // not needed
       } else {
-        ROCKSDB_VERIFY_EQ(cfh->GetComparator(), m_cf_cmp[cf_id]);
+        ROCKSDB_VERIFY_EQ(cfh->GetComparator(), m_cf_meta[cf_id].cmp);
       }
     }
     if (cfh->GetComparator()) { // Mock cfh comparator maybe null
@@ -1214,6 +1210,8 @@ void CSPP_WBWI::ClearIndex() {
   size_t cnt = 0;
   for (auto iter = m_head.m_next; iter != &m_head; iter = iter->m_next) {
     static_cast<Iter*>(iter)->m_idx = -1; // set invalid
+    static_cast<Iter*>(iter)->m_iter->dispose();
+    static_cast<Iter*>(iter)->m_iter = nullptr;
     cnt++;
   }
   TERARK_VERIFY_EQ(cnt, m_live_iter_num);
@@ -1225,6 +1223,13 @@ void CSPP_WBWI::ClearIndex() {
   new (&m_trie) MainPatricia(sizeof(VecNode), m_fac->trie_reserve_cap, ConLevel);
   new (&m_wtoken) Patricia::SingleWriterToken();
   m_trie.risk_set_live_iter_num(raw_iter_num);
+  // After clear index, it rebuilds index, so must re-init cf root
+  for (size_t cf_id = 0; cf_id < m_cf_meta.size(); cf_id++) {
+    auto& cf_meta = m_cf_meta[cf_id];
+    if (cf_meta.root != nil_root) {
+      cf_meta.root = 0 == cf_id ? initial_state : m_trie.new_root();
+    }
+  }
   m_wtoken.acquire(&m_trie);
   m_last_entry_offset = 0;
   m_last_sub_batch_offset = 0;
