@@ -1213,8 +1213,10 @@ void CSPP_WBWI::ClearIndex() {
   size_t cnt = 0;
   for (auto iter = m_head.m_next; iter != &m_head; iter = iter->m_next) {
     static_cast<Iter*>(iter)->m_idx = -1; // set invalid
-    static_cast<Iter*>(iter)->m_iter->dispose();
-    static_cast<Iter*>(iter)->m_iter = nullptr;
+    if (static_cast<Iter*>(iter)->m_iter) {
+      static_cast<Iter*>(iter)->m_iter->dispose();
+      static_cast<Iter*>(iter)->m_iter = nullptr;
+    }
     cnt++;
   }
   TERARK_VERIFY_EQ(cnt, m_live_iter_num);
