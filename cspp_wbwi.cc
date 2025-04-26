@@ -79,7 +79,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     }
     return m_default_cmp;
   }
-  void AddOrUpdateIndexCFH(ColumnFamilyHandle* cfh, WriteType type) {
+  void AddOrUpdateIndexCFH(ColumnFamilyHandle* cfh, WriteType type, Slice uk) {
     if (cfh) {
       ROCKSDB_ASSERT_F(!cfh->GetComparator() ||
                       IsBytewiseComparator(cfh->GetComparator()),
@@ -93,12 +93,12 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         ROCKSDB_ASSERT_EQ(cf_meta.cmp, cfh->GetComparator());
         ROCKSDB_ASSERT_NE(cf_meta.root, nil_root);
       }
-      AddOrUpdateIndexImpl(cf_id, type, cf_meta.root);
+      AddOrUpdateIndexImpl(cf_id, type, uk, cf_meta.root);
     } else {
-      AddOrUpdateIndex(0, type);
+      AddOrUpdateIndex(0, type, uk);
     }
   }
-  void AddOrUpdateIndex(uint32_t cf_id, WriteType type) {
+  void AddOrUpdateIndex(uint32_t cf_id, WriteType type, Slice uk) {
     auto& cf_meta = m_cf_meta.ensure_get(cf_id);
     if (UNLIKELY(cf_meta.root == nil_root)) {
       ROCKSDB_ASSERT_EQ(cf_meta.cmp, nullptr);
@@ -107,14 +107,17 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     } else {
       //ROCKSDB_ASSERT_EQ(cf_meta.cmp, m_default_cmp); // can be ne
     }
-    AddOrUpdateIndexImpl(cf_id, type, cf_meta.root);
+    AddOrUpdateIndexImpl(cf_id, type, uk, cf_meta.root);
   }
-  void AddOrUpdateIndexImpl(uint32_t cf_id, WriteType type, size_t root) {
+  void AddOrUpdateIndexImpl(uint32_t cf_id, WriteType type, Slice uk, size_t root) {
     size_t offset = m_last_entry_offset;
+   #if !defined(NDEBUG)
     Slice raw_entry = Slice(m_batch.Data()).substr(offset);
     Slice userkey = GetKeyFromWriteBatchEntry(raw_entry, cf_id != 0);
+    assert(userkey == uk);
+   #endif
     VecNode vn = {0,0};
-    if (m_trie.insert(userkey, &vn, &m_wtoken, root)) {
+    if (m_trie.insert(uk, &vn, &m_wtoken, root)) {
       vn.num = 1;
       vn.pos = uint32_t(m_trie.mem_alloc(sizeof(Elem)));
       *(Elem*)m_trie.mem_get(vn.pos) = Elem(offset);
@@ -216,22 +219,22 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         case kTypeColumnFamilyValue:
         case kTypeValue:
           found++;
-          AddOrUpdateIndex(cf_id, kPutRecord);
+          AddOrUpdateIndex(cf_id, kPutRecord, key);
           break;
         case kTypeColumnFamilyDeletion:
         case kTypeDeletion:
           found++;
-          AddOrUpdateIndex(cf_id, kDeleteRecord);
+          AddOrUpdateIndex(cf_id, kDeleteRecord, key);
           break;
         case kTypeColumnFamilySingleDeletion:
         case kTypeSingleDeletion:
           found++;
-          AddOrUpdateIndex(cf_id, kSingleDeleteRecord);
+          AddOrUpdateIndex(cf_id, kSingleDeleteRecord, key);
           break;
         case kTypeColumnFamilyMerge:
         case kTypeMerge:
           found++;
-          AddOrUpdateIndex(cf_id, kMergeRecord);
+          AddOrUpdateIndex(cf_id, kMergeRecord, key);
           break;
         case kTypeLogData:
         case kTypeBeginPrepareXID:
@@ -247,7 +250,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
         case kTypeWideColumnEntity:
       #if (ROCKSDB_MAJOR * 10000 + ROCKSDB_MINOR * 10 + ROCKSDB_PATCH) >= 80100
           found++;
-          AddOrUpdateIndex(cf_id, kPutEntityRecord);
+          AddOrUpdateIndex(cf_id, kPutEntityRecord, key);
       #else
           ROCKSDB_DIE("Not Supported: must be version 8.10+");
       #endif
@@ -310,7 +313,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     SetLastEntryOffset();
     auto s = m_batch.Put(cfh, key, value);
     if (s.ok()) {
-      AddOrUpdateIndexCFH(cfh, kPutRecord);
+      AddOrUpdateIndexCFH(cfh, kPutRecord, key);
     }
     return s;
   }
@@ -319,7 +322,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     SetLastEntryOffset();
     auto s = m_batch.Put(key, value);
     if (s.ok()) {
-      AddOrUpdateIndex(0, kPutRecord);
+      AddOrUpdateIndex(0, kPutRecord, key);
     }
     return s;
   }
@@ -334,7 +337,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     SetLastEntryOffset();
     auto s = m_batch.PutEntity(cfh, key, columns);
     if (s.ok()) {
-      AddOrUpdateIndexCFH(cfh, kPutEntityRecord);
+      AddOrUpdateIndexCFH(cfh, kPutEntityRecord, key);
     }
     return s;
   }
@@ -345,7 +348,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     SetLastEntryOffset();
     auto s = m_batch.Delete(cfh, key);
     if (s.ok()) {
-      AddOrUpdateIndexCFH(cfh, kDeleteRecord);
+      AddOrUpdateIndexCFH(cfh, kDeleteRecord, key);
     }
     return s;
   }
@@ -354,7 +357,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     SetLastEntryOffset();
     auto s = m_batch.Delete(key);
     if (s.ok()) {
-      AddOrUpdateIndex(0, kDeleteRecord);
+      AddOrUpdateIndex(0, kDeleteRecord, key);
     }
     return s;
   }
@@ -364,7 +367,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     SetLastEntryOffset();
     auto s = m_batch.SingleDelete(cfh, key);
     if (s.ok()) {
-      AddOrUpdateIndexCFH(cfh, kSingleDeleteRecord);
+      AddOrUpdateIndexCFH(cfh, kSingleDeleteRecord, key);
     }
     return s;
   }
@@ -373,7 +376,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     SetLastEntryOffset();
     auto s = m_batch.SingleDelete(key);
     if (s.ok()) {
-      AddOrUpdateIndex(0, kSingleDeleteRecord);
+      AddOrUpdateIndex(0, kSingleDeleteRecord, key);
     }
     return s;
   }
@@ -383,7 +386,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     SetLastEntryOffset();
     auto s = m_batch.Merge(cfh, key, value);
     if (s.ok()) {
-      AddOrUpdateIndexCFH(cfh, kMergeRecord);
+      AddOrUpdateIndexCFH(cfh, kMergeRecord, key);
     }
     return s;
   }
@@ -392,7 +395,7 @@ struct CSPP_WBWI : public WriteBatchWithIndex {
     SetLastEntryOffset();
     auto s = m_batch.Merge(key, value);
     if (s.ok()) {
-      AddOrUpdateIndex(0, kMergeRecord);
+      AddOrUpdateIndex(0, kMergeRecord, key);
     }
     return s;
   }
