@@ -16,6 +16,8 @@
 namespace ROCKSDB_NAMESPACE {
 using namespace terark;
 struct PairCheckWBWIFactory;
+template<class T>
+T& ConstCast(const T& x) { return const_cast<T&>(x); }
 struct PairCheckWBWI : public WriteBatchWithIndex {
   PairCheckWBWI() : WriteBatchWithIndex(Slice()) // default cons placeholder with Slice
   {
@@ -44,11 +46,11 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
     WriteBatch* wb = b->GetWriteBatch();
     size_t a_data_size = wa->GetDataSize();
     size_t b_data_size = wb->GetDataSize();
-    std::string& a_mut = const_cast<std::string&>(wa->Data());
-    std::string& b_mut = const_cast<std::string&>(wb->Data());
+    auto& a_mut = ConstCast(wa->Data());
+    auto& b_mut = ConstCast(wb->Data());
     if (b_data_size < a_data_size) {
       size_t len = a_data_size - b_data_size;
-      b_mut.append(a_mut, b_data_size, len);
+      b_mut.append(a_mut.data() + b_data_size, len);
     }
     if (b_data_size >= 13) { // 13 is header(12) + noop(1)
       // for prepared txn, rocksdb will update the header
