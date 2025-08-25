@@ -24,7 +24,7 @@ struct PairCheckWBWI : public WriteBatchWithIndex {
   }
   WriteBatchWithIndex *a, *b;
   PairCheckWBWIFactory* m_fac;
-  ~PairCheckWBWI() noexcept override;
+  ~PairCheckWBWI() override;
   const Comparator* GetUserComparator(uint32_t cf_id) const final {
     auto ac = a->GetUserComparator(cf_id);
     auto bc = a->GetUserComparator(cf_id);
@@ -524,11 +524,11 @@ struct PairCheckWBWIFactory final : public WBWIFactory {
     return JsonToString(djs, d);
   }
 };
-PairCheckWBWI::Iter::~Iter() noexcept {
+PairCheckWBWI::Iter::~Iter() {
   delete ia;
   delete ib;
 }
-PairCheckWBWI::~PairCheckWBWI() noexcept {
+PairCheckWBWI::~PairCheckWBWI() {
   delete a;
   delete b;
 }
